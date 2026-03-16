@@ -5,8 +5,7 @@ Wraps the Henrik Dev Valorant API (https://docs.henrikdev.xyz/valorant/general)
 as a set of MCP tools callable by any MCP-compatible AI client.
 
 Environment variables:
-  HENRIK_API_KEY  (optional) Your Henrik Dev API key for higher rate limits.
-                  Without a key the API still works at the free / basic tier.
+  HENRIK_API_KEY  (required) Your Henrik Dev API key.
 
 Usage:
   valorant-mcp-server              # run via installed script

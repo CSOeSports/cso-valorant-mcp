@@ -11,7 +11,10 @@ from typing import Any
 import httpx
 
 BASE_URL = "https://api.henrikdev.xyz"
-_API_KEY = os.environ.get("HENRIK_API_KEY", "")
+_API_KEY = os.environ.get("HENRIK_API_KEY")
+
+if not _API_KEY:
+    raise RuntimeError("HENRIK_API_KEY environment variable is not set")
 
 
 def _build_headers() -> dict[str, str]:
@@ -44,7 +47,11 @@ async def get(path: str, params: dict[str, Any] | None = None) -> Any:
     # Henrik API wraps errors in a "status" field.
     if isinstance(data, dict) and data.get("status") not in (None, 200, 1):
         errors = data.get("errors", [{"message": "Unknown API error"}])
-        message = errors[0].get("message", "Unknown API error") if errors else "Unknown API error"
+        message = (
+            errors[0].get("message", "Unknown API error")
+            if errors
+            else "Unknown API error"
+        )
         raise RuntimeError(f"Henrik API error (status {data.get('status')}): {message}")
 
     return data
