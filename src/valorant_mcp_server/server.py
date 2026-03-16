@@ -235,7 +235,14 @@ async def get_match(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def get_leaderboard(
     region: Region,
     platform: Platform = "pc",
