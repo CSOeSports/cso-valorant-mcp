@@ -139,7 +139,14 @@ async def get_mmr_by_puuid(
     return await mmr.get_mmr_by_puuid(region, puuid, platform)
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def get_mmr_history(
     region: Region,
     puuid: str,
@@ -163,7 +170,14 @@ async def get_mmr_history(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def get_match_history(
     region: Region,
     name: str,
@@ -185,14 +199,21 @@ async def get_match_history(
         platform: 'pc' (default) or 'console'.
         mode: Optional game mode filter (e.g. 'competitive', 'unrated').
         map: Optional map name filter (e.g. 'Ascent').
-        size: Number of matches to return.
+        size: Number of matches to return. Default and max vary by API tier.
     """
     return await matches.get_match_history(
         region, name, tag, platform, mode, map_name, size
     )
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def get_match(
     region: Region,
     match_id: str,
