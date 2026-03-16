@@ -28,8 +28,8 @@ async def get_mmr(
         platform: Platform to query. Either 'pc' (default) or 'console'.
 
     Returns:
-        A dictionary containing current rank tier, ranked rating (RR),
-        leaderboard position, wins, and card/title metadata.
+        account, peak, currentposition
+        and seasonal mmr info for the given player#tag.
     """
     data = await client.get(f"/valorant/v3/mmr/{region}/{platform}/{name}/{tag}")
     return data.get("data", data)
@@ -58,7 +58,7 @@ async def get_mmr_history(
     region: Region,
     puuid: str,
     platform: Platform = "pc",
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Retrieve ranked rating (RR) change history for a player by PUUID.
 
     Args:
@@ -70,5 +70,7 @@ async def get_mmr_history(
         A list of MMR history entries. Each entry includes match_id,
         tier, ranking_in_tier (RR), rr_change_to_last_game, date, and map.
     """
-    data = await client.get(f"/valorant/v3/by-puuid/mmr/history/{region}/{platform}/{puuid}")
+    data = await client.get(
+        f"/valorant/v2/by-puuid/mmr-history/{region}/{platform}/{puuid}"
+    )
     return data.get("data", data)

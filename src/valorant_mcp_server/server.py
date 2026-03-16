@@ -18,7 +18,13 @@ from mcp.types import ToolAnnotations
 
 from mcp.server.fastmcp import FastMCP
 
-from valorant_mcp_server.literals import GameMode, MapName, Platform, Region, SeasonShort
+from valorant_mcp_server.literals import (
+    GameMode,
+    MapName,
+    Platform,
+    Region,
+    SeasonShort,
+)
 from valorant_mcp_server.tools import accounts, leaderboard, matches, mmr
 
 # ---------------------------------------------------------------------------
@@ -82,17 +88,24 @@ async def get_account_by_puuid(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def get_mmr(
     region: Region,
     name: str,
     tag: str,
     platform: Platform = "pc",
 ) -> dict[str, Any]:
-    """Retrieve current MMR / rank details for a player by Riot ID.
+    """Retrieve current MMR / rank details for a player by Player#Tag.
 
-    Returns tier name (e.g. 'Immortal 3'), ranked rating (RR), and
-    leaderboard position for players in Radiant/Immortal.
+    Returns account, peak, currentposition
+    and seasonal mmr info.
 
     Args:
         region: Server region — eu, na, latam, br, ap, or kr.
@@ -103,7 +116,14 @@ async def get_mmr(
     return await mmr.get_mmr(region, name, tag, platform)
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def get_mmr_by_puuid(
     region: Region,
     puuid: str,
@@ -124,7 +144,7 @@ async def get_mmr_history(
     region: Region,
     puuid: str,
     platform: Platform = "pc",
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """Retrieve ranked rating (RR) change history for a player by PUUID.
 
     Each entry shows the RR gained/lost in a competitive match along
@@ -167,7 +187,9 @@ async def get_match_history(
         map: Optional map name filter (e.g. 'Ascent').
         size: Number of matches to return.
     """
-    return await matches.get_match_history(region, name, tag, platform, mode, map_name, size)
+    return await matches.get_match_history(
+        region, name, tag, platform, mode, map_name, size
+    )
 
 
 @mcp.tool()
