@@ -25,10 +25,20 @@ GameMode = Literal[
     "swiftplay",
     "unrated",
 ]
+# TODO: Get all map names from Henrik API or Riot API docs
 MapName = Literal[
-    "Ascent", "Split", "Fracture", "Bind", "Breeze",
-    "District", "Kasbah", "Piazza", "Lotus", "Pearl",
-    "Icebox", "Haven",
+    "Ascent",
+    "Split",
+    "Fracture",
+    "Bind",
+    "Breeze",
+    "District",
+    "Kasbah",
+    "Piazza",
+    "Lotus",
+    "Pearl",
+    "Icebox",
+    "Haven",
 ]
 
 
@@ -38,7 +48,7 @@ async def get_match_history(
     tag: str,
     platform: Platform = "pc",
     mode: GameMode | None = None,
-    map: MapName | None = None,
+    map_name: MapName | None = None,
     size: int | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve recent match history for a player by Riot ID.
@@ -49,7 +59,7 @@ async def get_match_history(
         tag: The player's tag line without '#'.
         platform: Platform to query — 'pc' (default) or 'console'.
         mode: Optional game mode filter (e.g. 'competitive', 'unrated').
-        map: Optional map name filter (e.g. 'Ascent', 'Bind').
+        map_name: Optional map_name name filter (e.g. 'Ascent', 'Bind').
         size: Number of matches to return (max varies by API tier).
 
     Returns:
@@ -59,8 +69,8 @@ async def get_match_history(
     params: dict[str, Any] = {}
     if mode:
         params["mode"] = mode
-    if map:
-        params["map"] = map
+    if map_name:
+        params["map_name"] = map_name
     if size is not None:
         params["size"] = size
 
