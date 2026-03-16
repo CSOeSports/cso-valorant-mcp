@@ -13,11 +13,12 @@ Usage:
   uv run mcp dev src/valorant_mcp_server/server.py  # MCP Inspector
 """
 
-from typing import Any, Literal
+from typing import Any
 from mcp.types import ToolAnnotations
 
 from mcp.server.fastmcp import FastMCP
 
+from valorant_mcp_server.literals import GameMode, MapName, Platform, Region, SeasonShort
 from valorant_mcp_server.tools import accounts, leaderboard, matches, mmr
 
 # ---------------------------------------------------------------------------
@@ -83,10 +84,10 @@ async def get_account_by_puuid(
 
 @mcp.tool()
 async def get_mmr(
-    region: Literal["eu", "na", "latam", "br", "ap", "kr"],
+    region: Region,
     name: str,
     tag: str,
-    platform: Literal["pc", "console"] = "pc",
+    platform: Platform = "pc",
 ) -> dict[str, Any]:
     """Retrieve current MMR / rank details for a player by Riot ID.
 
@@ -104,9 +105,9 @@ async def get_mmr(
 
 @mcp.tool()
 async def get_mmr_by_puuid(
-    region: Literal["eu", "na", "latam", "br", "ap", "kr"],
+    region: Region,
     puuid: str,
-    platform: Literal["pc", "console"] = "pc",
+    platform: Platform = "pc",
 ) -> dict[str, Any]:
     """Retrieve current MMR / rank details for a player by PUUID.
 
@@ -120,9 +121,9 @@ async def get_mmr_by_puuid(
 
 @mcp.tool()
 async def get_mmr_history(
-    region: Literal["eu", "na", "latam", "br", "ap", "kr"],
+    region: Region,
     puuid: str,
-    platform: Literal["pc", "console"] = "pc",
+    platform: Platform = "pc",
 ) -> list[dict[str, Any]]:
     """Retrieve ranked rating (RR) change history for a player by PUUID.
 
@@ -144,46 +145,12 @@ async def get_mmr_history(
 
 @mcp.tool()
 async def get_match_history(
-    region: Literal["eu", "na", "latam", "br", "ap", "kr"],
+    region: Region,
     name: str,
     tag: str,
-    platform: Literal["pc", "console"] = "pc",
-    mode: (
-        Literal[
-            "competitive",
-            "custom",
-            "deathmatch",
-            "escalation",
-            "teamdeathmatch",
-            "newmap",
-            "replication",
-            "snowballfight",
-            "spikerush",
-            "swiftplay",
-            "unrated",
-        ]
-        | None
-    ) = None,
-    map_name: (
-        Literal[
-            "Ascent",
-            "Split",
-            "Abyss",
-            "Bind",
-            "Breeze",
-            "Corrode",
-            "District",
-            "Fracture",
-            "Haven",
-            "Icebox",
-            "Kasbah",
-            "Lotus",
-            "Piazza",
-            "Pearl",
-            "Sunset",
-        ]
-        | None
-    ) = None,
+    platform: Platform = "pc",
+    mode: GameMode | None = None,
+    map_name: MapName | None = None,
     size: int | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve recent match history for a player by Riot ID.
@@ -205,7 +172,7 @@ async def get_match_history(
 
 @mcp.tool()
 async def get_match(
-    region: Literal["eu", "na", "latam", "br", "ap", "kr"],
+    region: Region,
     match_id: str,
 ) -> dict[str, Any]:
     """Retrieve full details for a single Valorant match by match ID.
@@ -227,12 +194,12 @@ async def get_match(
 
 @mcp.tool()
 async def get_leaderboard(
-    region: Literal["eu", "na", "latam", "br", "ap", "kr"],
-    platform: Literal["pc", "console"] = "pc",
+    region: Region,
+    platform: Platform = "pc",
     name: str | None = None,
     tag: str | None = None,
     puuid: str | None = None,
-    season_short: leaderboard.SeasonShort | None = None,
+    season_short: SeasonShort | None = None,
     size: int | None = None,
     page: int | None = None,
 ) -> dict[str, Any]:

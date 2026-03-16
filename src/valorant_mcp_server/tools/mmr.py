@@ -7,12 +7,10 @@ Endpoints used:
   GET /valorant/v3/by-puuid/mmr/history/{region}/{platform}/{puuid}
 """
 
-from typing import Any, Literal
+from typing import Any
 
 from valorant_mcp_server import client
-
-Region = Literal["eu", "na", "latam", "br", "ap", "kr"]
-Platform = Literal["pc", "console"]
+from valorant_mcp_server.literals import Platform, Region
 
 
 async def get_mmr(

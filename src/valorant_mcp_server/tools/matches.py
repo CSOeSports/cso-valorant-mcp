@@ -6,43 +6,10 @@ Endpoints used:
   GET /valorant/v4/match/{region}/{matchid}
 """
 
-from typing import Any, Literal
+from typing import Any
 
 from valorant_mcp_server import client
-
-Region = Literal["eu", "na", "latam", "br", "ap", "kr"]
-Platform = Literal["pc", "console"]
-GameMode = Literal[
-    "competitive",
-    "custom",
-    "deathmatch",
-    "escalation",
-    "teamdeathmatch",
-    "newmap",
-    "replication",
-    "snowballfight",
-    "spikerush",
-    "swiftplay",
-    "unrated",
-]
-# TODO: Get all map names from Henrik API or Riot API docs
-MapName = Literal[
-    "Ascent",
-    "Split",
-    "Abyss",
-    "Bind",
-    "Breeze",
-    "Corrode",
-    "District",
-    "Fracture",
-    "Haven",
-    "Icebox",
-    "Kasbah",
-    "Lotus",
-    "Piazza",
-    "Pearl",
-    "Sunset",
-]
+from valorant_mcp_server.literals import GameMode, MapName, Platform, Region
 
 
 async def get_match_history(
