@@ -29,16 +29,19 @@ GameMode = Literal[
 MapName = Literal[
     "Ascent",
     "Split",
-    "Fracture",
+    "Abyss",
     "Bind",
     "Breeze",
+    "Corrode",
     "District",
-    "Kasbah",
-    "Piazza",
-    "Lotus",
-    "Pearl",
-    "Icebox",
+    "Fracture",
     "Haven",
+    "Icebox",
+    "Kasbah",
+    "Lotus",
+    "Piazza",
+    "Pearl",
+    "Sunset",
 ]
 
 

@@ -164,20 +164,23 @@ async def get_match_history(
         ]
         | None
     ) = None,
-    map: (
+    map_name: (
         Literal[
             "Ascent",
             "Split",
-            "Fracture",
+            "Abyss",
             "Bind",
             "Breeze",
+            "Corrode",
             "District",
-            "Kasbah",
-            "Piazza",
-            "Lotus",
-            "Pearl",
-            "Icebox",
+            "Fracture",
             "Haven",
+            "Icebox",
+            "Kasbah",
+            "Lotus",
+            "Piazza",
+            "Pearl",
+            "Sunset",
         ]
         | None
     ) = None,
@@ -197,7 +200,7 @@ async def get_match_history(
         map: Optional map name filter (e.g. 'Ascent').
         size: Number of matches to return.
     """
-    return await matches.get_match_history(region, name, tag, platform, mode, map, size)
+    return await matches.get_match_history(region, name, tag, platform, mode, map_name, size)
 
 
 @mcp.tool()
