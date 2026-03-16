@@ -13,8 +13,8 @@ Usage:
   uv run mcp dev src/valorant_mcp_server/server.py  # MCP Inspector
 """
 
-from mcp.types import ToolAnnotations
 from typing import Any, Literal
+from mcp.types import ToolAnnotations
 
 from mcp.server.fastmcp import FastMCP
 
@@ -229,7 +229,7 @@ async def get_leaderboard(
     name: str | None = None,
     tag: str | None = None,
     puuid: str | None = None,
-    season_short: str | None = None,
+    season_short: leaderboard.SeasonShort | None = None,
     size: int | None = None,
     page: int | None = None,
 ) -> dict[str, Any]:
