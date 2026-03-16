@@ -10,6 +10,10 @@ from typing import Any
 
 import httpx
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 BASE_URL = "https://api.henrikdev.xyz"
 _API_KEY = os.environ.get("HENRIK_API_KEY")
 
