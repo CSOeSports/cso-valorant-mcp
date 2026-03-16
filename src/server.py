@@ -36,7 +36,7 @@ mcp = FastMCP("Valorant MCP Server")
         readOnlyHint=True,
         destructiveHint=False,
         idempotentHint=True,
-        OpenWorldHint=True,
+        openWorldHint=True,
     )
 )
 async def get_account(
@@ -59,7 +59,7 @@ async def get_account(
         readOnlyHint=True,
         destructiveHint=False,
         idempotentHint=True,
-        OpenWorldHint=True,
+        openWorldHint=True,
     )
 )
 async def get_account_by_puuid(
