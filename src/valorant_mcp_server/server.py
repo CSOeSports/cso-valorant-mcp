@@ -24,8 +24,10 @@ from valorant_mcp_server.literals import (
     Platform,
     Region,
     SeasonShort,
+    EsportsRegion,
+    League,
 )
-from valorant_mcp_server.tools import accounts, leaderboard, matches, mmr
+from valorant_mcp_server.tools import accounts, leaderboard, matches, mmr, esports
 
 # ---------------------------------------------------------------------------
 # Server instance
@@ -271,6 +273,35 @@ async def get_leaderboard(
     return await leaderboard.get_leaderboard(
         region, platform, name, tag, puuid, season_short, size, page
     )
+
+
+# ---------------------------------------------------------------------------
+# Esports Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+async def get_esports_games_data(
+    region: EsportsRegion | None = None,
+    league: list[League] | None = None,
+) -> list[dict[str, Any]]:
+    """Retrieve the current and upcoming schedule for Valorant esports matches.
+
+    Can be filtered by a specific broader region or by an explicit list
+    of leagues/tournaments.
+
+    Args:
+        region: Optional region to filter by (e.g., 'international', 'north america', 'emea').
+        league: Optional list of specific leagues to filter by (e.g., ['vct_americas', 'vct_emea']).
+    """
+    return await esports.get_esports_games_data(region, league)
 
 
 # ---------------------------------------------------------------------------
