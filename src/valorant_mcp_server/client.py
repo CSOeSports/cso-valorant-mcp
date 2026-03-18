@@ -6,19 +6,31 @@ Authentication: pass HENRIK_API_KEY environment variable for higher rate limits.
 """
 
 import os
+import sys
 from typing import Any
 
 import httpx
 
 from dotenv import load_dotenv
 
-load_dotenv()
+_ = load_dotenv()
 
 BASE_URL = "https://api.henrikdev.xyz"
-_API_KEY = os.environ.get("HENRIK_API_KEY")
+_API_KEY = os.getenv("HENRIK_API_KEY")
 
 if not _API_KEY:
-    raise RuntimeError("HENRIK_API_KEY environment variable is not set")
+    ERROR_MESSAGE = (
+        "\n=================================================================\n"
+        "ERRO: CHAVE DE API DO VALORANT NÃO ENCONTRADA\n"
+        "=================================================================\n"
+        "A variável de ambiente 'HENRIK_API_KEY' não está configurada.\n"
+        "Se você está usando Docker no Claude Desktop, verifique se passou o argumento:\n"
+        '"-e", "HENRIK_API_KEY=sua_chave_aqui"\n'
+        "dentro da seção 'args' do seu arquivo claude_desktop_config.json.\n"
+        "=================================================================\n"
+    )
+    print(ERROR_MESSAGE, file=sys.stderr)
+    sys.exit(1)
 
 
 def _build_headers() -> dict[str, str]:
