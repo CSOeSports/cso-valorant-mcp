@@ -1,13 +1,12 @@
-.env
-
-# Python-generated files
+.venv/
 __pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-.vscode
-
-# Virtual environments
-.venv
+*.pyc
+.env
+*.env
+valorant-mcp.env
+.env.*
+*.log
+*.bak
+*.backup*
+*.backup-*
+.DS_Store
