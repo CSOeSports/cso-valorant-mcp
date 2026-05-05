@@ -1,15 +1,64 @@
-name: Publish Docker Image
+name: CI and Publish Docker Image
 
 on:
+  pull_request:
   push:
-    branches: ["main", "feature/docker-suport"]
+    branches: ["main"]
+    tags: ["v*"]
+
+env:
+  IMAGE_NAME: ghcr.io/csoesports/cso-valorant-mcp
 
 jobs:
-  build-and-push:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Compile source
+        run: uv run python -m compileall -q src
+
+      - name: Smoke test tool registry
+        run: |
+          uv run python - <<'PY'
+          import asyncio
+          from valorant_mcp_server.server import mcp
+
+          async def main():
+              tools = await mcp.list_tools()
+              assert tools, "No MCP tools registered"
+              print(f"Registered {len(tools)} MCP tools")
+
+          asyncio.run(main())
+          PY
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: cso-valorant-mcp:ci
+
+  publish:
+    needs: ci
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write   
+      packages: write
 
     steps:
       - name: Checkout repository
@@ -22,9 +71,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: ghcr.io/codenilson/valorant-mcp-server:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

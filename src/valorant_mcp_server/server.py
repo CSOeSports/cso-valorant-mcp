@@ -13,9 +13,8 @@ Usage:
   uv run mcp dev src/valorant_mcp_server/server.py  # MCP Inspector
 """
 
-from typing import Any
 import os
-import httpx
+from typing import Any
 from mcp.types import ToolAnnotations
 
 from mcp.server.fastmcp import FastMCP
@@ -30,7 +29,60 @@ from valorant_mcp_server.literals import (
     EsportsRegion,
     League,
 )
+from valorant_mcp_server.cso_utils import (
+    cso_agent_counts_from_report as _cso_agent_counts_from_report,
+    cso_role_from_agents as _cso_role_from_agents,
+    extract_match_id as _extract_match_id,
+    extract_match_length_seconds as _extract_match_length_seconds,
+    extract_match_started_at as _extract_match_started_at,
+    extract_queue_name as _extract_queue_name,
+    format_hhmmss as _format_hhmmss,
+    playtime_window as _playtime_window,
+)
+from valorant_mcp_server.henrik import (
+    content_slice as _content_slice,
+    henrik_get as _henrik_get,
+)
+from valorant_mcp_server.match_utils import (
+    agent_name as _agent_name,
+    find_player_in_match as _find_player_in_match,
+    map_name_from_match as _map_name_from_match,
+    match_meta as _match_meta,
+    player_identity as _player_identity,
+    player_rows_from_match as _player_rows_from_match,
+    player_stats as _player_stats,
+    safe_get as _safe_get,
+    team_won as _team_won,
+)
 from valorant_mcp_server.tools import accounts, leaderboard, matches, mmr, esports
+
+def _csv_env(name: str, defaults: list[str]) -> list[str]:
+    value = os.getenv(name)
+    if not value:
+        return defaults
+
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    return items or defaults
+
+
+DEFAULT_ALLOWED_HOSTS = [
+    "localhost",
+    "localhost:*",
+    "127.0.0.1",
+    "127.0.0.1:*",
+    "valorant.csoesports.com",
+    "valorant.csoesports.com:*",
+]
+
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost",
+    "http://localhost:*",
+    "http://127.0.0.1",
+    "http://127.0.0.1:*",
+    "https://valorant.csoesports.com",
+    "https://valorant.csoesports.com:*",
+]
+
 
 # ---------------------------------------------------------------------------
 # Server instance
@@ -40,22 +92,8 @@ mcp = FastMCP(
     "Valorant MCP Server",
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "localhost",
-            "localhost:*",
-            "127.0.0.1",
-            "127.0.0.1:*",
-            "valorant.csoesports.com",
-            "valorant.csoesports.com:*",
-        ],
-        allowed_origins=[
-            "http://localhost",
-            "http://localhost:*",
-            "http://127.0.0.1",
-            "http://127.0.0.1:*",
-            "https://valorant.csoesports.com",
-            "https://valorant.csoesports.com:*",
-        ],
+        allowed_hosts=_csv_env("MCP_ALLOWED_HOSTS", DEFAULT_ALLOWED_HOSTS),
+        allowed_origins=_csv_env("MCP_ALLOWED_ORIGINS", DEFAULT_ALLOWED_ORIGINS),
     ),
 )
 
@@ -333,99 +371,6 @@ async def get_esports_games_data(
 # ---------------------------------------------------------------------------
 # Derived Analytics / Scouting Tools
 # ---------------------------------------------------------------------------
-
-def _safe_get(obj: Any, *keys: str, default: Any = None) -> Any:
-    cur = obj
-    for key in keys:
-        if isinstance(cur, dict):
-            cur = cur.get(key, default)
-        else:
-            return default
-    return cur
-
-
-def _player_rows_from_match(match_data: dict[str, Any]) -> list[dict[str, Any]]:
-    players = (
-        _safe_get(match_data, "data", "players", "all_players", default=None)
-        or _safe_get(match_data, "players", "all_players", default=None)
-        or _safe_get(match_data, "data", "players", default=None)
-        or _safe_get(match_data, "players", default=None)
-        or []
-    )
-
-    if isinstance(players, dict):
-        combined: list[dict[str, Any]] = []
-        for value in players.values():
-            if isinstance(value, list):
-                combined.extend(value)
-        return combined
-
-    return players if isinstance(players, list) else []
-
-
-def _match_meta(match_data: dict[str, Any]) -> dict[str, Any]:
-    return (
-        _safe_get(match_data, "data", "metadata", default=None)
-        or _safe_get(match_data, "metadata", default=None)
-        or {}
-    )
-
-
-def _player_identity(row: dict[str, Any]) -> str:
-    name = row.get("name") or row.get("gameName") or row.get("game_name") or row.get("riotIdGameName")
-    tag = row.get("tag") or row.get("tagLine") or row.get("tag_line") or row.get("riotIdTagline")
-    if name and tag:
-        return f"{name}#{tag}"
-    return str(row.get("puuid") or row.get("id") or "unknown")
-
-
-def _player_stats(row: dict[str, Any]) -> dict[str, Any]:
-    stats = row.get("stats") or {}
-    return {
-        "kills": int(stats.get("kills") or row.get("kills") or 0),
-        "deaths": int(stats.get("deaths") or row.get("deaths") or 0),
-        "assists": int(stats.get("assists") or row.get("assists") or 0),
-        "score": int(stats.get("score") or row.get("score") or 0),
-    }
-
-
-def _find_player_in_match(match_data: dict[str, Any], name: str | None = None, tag: str | None = None, puuid: str | None = None) -> dict[str, Any] | None:
-    for row in _player_rows_from_match(match_data):
-        if puuid and row.get("puuid") == puuid:
-            return row
-        if name and tag:
-            r_name = str(row.get("name") or row.get("gameName") or "").lower()
-            r_tag = str(row.get("tag") or row.get("tagLine") or "").lower()
-            if r_name == name.lower() and r_tag == tag.lower():
-                return row
-    return None
-
-
-def _agent_name(row: dict[str, Any]) -> str:
-    character = row.get("character") or row.get("agent") or {}
-    if isinstance(character, dict):
-        return str(character.get("name") or character.get("displayName") or "Unknown")
-    return str(character or "Unknown")
-
-
-def _map_name_from_match(match_data: dict[str, Any]) -> str:
-    meta = _match_meta(match_data)
-    return str(meta.get("map") or meta.get("map_name") or meta.get("mapName") or "Unknown")
-
-
-def _team_won(row: dict[str, Any], match_data: dict[str, Any]) -> bool | None:
-    player_team = row.get("team") or row.get("team_id") or row.get("teamId")
-    teams = _safe_get(match_data, "data", "teams", default=None) or match_data.get("teams")
-
-    if isinstance(teams, dict) and player_team:
-        team_data = teams.get(str(player_team).lower()) or teams.get(str(player_team).upper()) or teams.get(player_team)
-        if isinstance(team_data, dict):
-            has_won = team_data.get("has_won")
-            if has_won is not None:
-                return bool(has_won)
-
-    return None
-
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_player_summary(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 10) -> dict[str, Any]:
@@ -712,51 +657,6 @@ async def identify_consistent_players(region: Region, candidates: list[dict[str,
 # ---------------------------------------------------------------------------
 # HenrikDev Full API Wrapper Tools
 # ---------------------------------------------------------------------------
-
-HENRIK_BASE_URL = "https://api.henrikdev.xyz"
-
-
-async def _henrik_get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-    api_key = os.getenv("HENRIK_API_KEY")
-    if not api_key:
-        raise RuntimeError("HENRIK_API_KEY is not set")
-
-    clean_params = {k: v for k, v in (params or {}).items() if v is not None}
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            f"{HENRIK_BASE_URL}{path}",
-            headers={
-                "Authorization": api_key,
-                "Accept": "application/json",
-            },
-            params=clean_params,
-        )
-
-    try:
-        payload = response.json()
-    except Exception:
-        payload = {"raw": response.text}
-
-    if response.status_code >= 400:
-        return {
-            "error": True,
-            "status_code": response.status_code,
-            "path": path,
-            "params": clean_params,
-            "response": payload,
-        }
-
-    return payload
-
-
-def _content_slice(payload: dict[str, Any], key: str) -> dict[str, Any]:
-    data = payload.get("data", payload)
-    return {
-        "version": data.get("version"),
-        key: data.get(key, []),
-    }
-
 
 # Accounts
 
@@ -1118,51 +1018,6 @@ async def get_valorant_news(countrycode: str = "en-us") -> dict[str, Any]:
 # Phase 3 – CSO Academy / Scouting Tools
 # ---------------------------------------------------------------------------
 
-def _cso_role_from_agents(agent_counts: dict[str, int]) -> dict[str, Any]:
-    role_map = {
-        "jett": "duelist", "raze": "duelist", "reyna": "duelist", "phoenix": "duelist",
-        "neon": "duelist", "yoru": "duelist", "iso": "duelist", "waylay": "duelist",
-
-        "omen": "controller", "brimstone": "controller", "viper": "controller",
-        "astra": "controller", "harbor": "controller", "clove": "controller",
-
-        "sova": "initiator", "breach": "initiator", "skye": "initiator",
-        "kayo": "initiator", "kAY/O": "initiator", "fade": "initiator",
-        "gekko": "initiator", "tejo": "initiator",
-
-        "sage": "sentinel", "cypher": "sentinel", "killjoy": "sentinel",
-        "chamber": "sentinel", "deadlock": "sentinel", "vyse": "sentinel",
-    }
-
-    roles: dict[str, int] = {}
-
-    for agent, count in agent_counts.items():
-        role = role_map.get(str(agent).lower(), "unknown")
-        roles[role] = roles.get(role, 0) + int(count or 0)
-
-    primary_role = "unknown"
-    if roles:
-        primary_role = max(roles.items(), key=lambda item: item[1])[0]
-
-    return {
-        "primary_role": primary_role,
-        "role_counts": roles,
-    }
-
-
-def _cso_agent_counts_from_report(report: dict[str, Any]) -> dict[str, int]:
-    agent_counts = report.get("agent_counts")
-    if isinstance(agent_counts, dict):
-        return agent_counts
-
-    counts: dict[str, int] = {}
-    for match in report.get("matches", []) or []:
-        agent = match.get("agent")
-        if agent and agent != "Unknown":
-            counts[agent] = counts.get(agent, 0) + 1
-    return counts
-
-
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_academy_weekly_playtime_report(
     players: list[dict[str, str]],
@@ -1255,7 +1110,9 @@ async def get_role_profile(
     role = _cso_role_from_agents(agent_counts)
     agent_pool_size = len(agent_counts)
 
-    if agent_pool_size <= 2:
+    if agent_pool_size == 0:
+        role_stability = "unknown"
+    elif agent_pool_size <= 2:
         role_stability = "high"
     elif agent_pool_size <= 4:
         role_stability = "medium"
@@ -1272,7 +1129,8 @@ async def get_role_profile(
         "role_counts": role["role_counts"],
         "role_stability": role_stability,
         "confidence": report.get("confidence"),
-        "notes": report.get("notes", []),
+        "notes": (report.get("notes") or [])
+        + ([] if agent_counts else ["No agent data could be extracted from the counted matches."]),
     }
 
 
@@ -1473,114 +1331,6 @@ async def compare_players(
     }
 
 
-# ---------------------------------------------------------------------------
-# Toolset Cleanup
-# ---------------------------------------------------------------------------
-
-def _prune_mcp_tools() -> None:
-    """Hide legacy/duplicate tools from the MCP tool registry."""
-    remove_names = {
-        "get_account",
-        "get_account_by_puuid",
-        "get_mmr",
-        "get_mmr_by_puuid",
-        "get_mmr_history",
-        "get_match_history",
-        "get_match",
-        "get_leaderboard",
-        "get_esports_games_data",
-        "get_account_v1",
-        "get_account_by_puuid_v1",
-        "get_match_details_v2",
-        "get_mmr_history_v1",
-        "get_stored_mmr_history",
-        "get_store_featured_v1",
-    }
-
-    candidates = [
-        getattr(mcp, "_tool_manager", None),
-        getattr(mcp, "tool_manager", None),
-        mcp,
-    ]
-
-    for obj in candidates:
-        if obj is None:
-            continue
-
-        for attr in ("_tools", "tools"):
-            registry = getattr(obj, attr, None)
-            if isinstance(registry, dict):
-                for name in remove_names:
-                    registry.pop(name, None)
-
-
-_prune_mcp_tools()
-
-
-from datetime import datetime, timezone, timedelta
-
-def _parse_iso_datetime(value: Any) -> datetime | None:
-    if not value:
-        return None
-    try:
-        text = str(value).replace("Z", "+00:00")
-        return datetime.fromisoformat(text)
-    except Exception:
-        return None
-
-def _format_hhmmss(seconds: int) -> str:
-    seconds = max(int(seconds), 0)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-def _extract_v4_match_meta(item: dict[str, Any]) -> dict[str, Any]:
-    return item.get("metadata") or item.get("meta") or {}
-
-def _extract_match_id(item: dict[str, Any]) -> str | None:
-    meta = _extract_v4_match_meta(item)
-    return (
-        meta.get("match_id")
-        or meta.get("id")
-        or item.get("match_id")
-        or item.get("id")
-    )
-
-def _extract_match_started_at(item: dict[str, Any]) -> datetime | None:
-    meta = _extract_v4_match_meta(item)
-    return (
-        _parse_iso_datetime(meta.get("started_at"))
-        or _parse_iso_datetime(meta.get("game_start_patched"))
-    )
-
-def _extract_match_length_seconds(item: dict[str, Any]) -> int | None:
-    meta = _extract_v4_match_meta(item)
-
-    # v4 format
-    if meta.get("game_length_in_ms") is not None:
-        try:
-            return int(meta["game_length_in_ms"]) // 1000
-        except Exception:
-            pass
-
-    # older v3/v2 format often uses game_length in ms
-    if meta.get("game_length") is not None:
-        try:
-            value = int(meta["game_length"])
-            return value // 1000 if value > 10000 else value
-        except Exception:
-            pass
-
-    return None
-
-def _extract_queue_name(item: dict[str, Any]) -> str:
-    meta = _extract_v4_match_meta(item)
-    queue = meta.get("queue")
-    if isinstance(queue, dict):
-        return str(queue.get("id") or queue.get("name") or "unknown").lower()
-    return str(meta.get("mode_id") or meta.get("mode") or "unknown").lower()
-
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_player_playtime(
     region: Region,
@@ -1607,14 +1357,15 @@ async def get_player_playtime(
         page_size: Henrik v4 matchlist page size. Docs indicate max 10.
         max_pages: Number of pages to scan.
     """
-    now = datetime.now(timezone.utc)
-    window_start = now - timedelta(days=days)
+    now, window_start = _playtime_window(days)
 
     total_seconds = 0
     counted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    agent_lookup_errors: list[dict[str, Any]] = []
     daily: dict[str, dict[str, Any]] = {}
     modes: dict[str, dict[str, Any]] = {}
+    agent_counts: dict[str, int] = {}
 
     seen_match_ids: set[str] = set()
     stopped_due_to_old_match = False
@@ -1699,13 +1450,30 @@ async def get_player_playtime(
             mode_bucket["seconds"] += length_seconds
             mode_bucket["hhmmss"] = _format_hhmmss(mode_bucket["seconds"])
 
-            counted.append({
+            counted_match = {
                 "match_id": match_id,
                 "started_at": started_at.isoformat(),
                 "queue": queue_name,
                 "seconds": length_seconds,
                 "hhmmss": _format_hhmmss(length_seconds),
-            })
+            }
+
+            if match_id:
+                try:
+                    details = await get_match_details_v4(region, match_id)
+                    player_row = _find_player_in_match(details, name=name, tag=tag)
+                    if player_row:
+                        agent = _agent_name(player_row)
+                        counted_match["agent"] = agent
+                        if agent != "Unknown":
+                            agent_counts[agent] = agent_counts.get(agent, 0) + 1
+                except Exception as exc:
+                    agent_lookup_errors.append({
+                        "match_id": match_id,
+                        "error": str(exc),
+                    })
+
+            counted.append(counted_match)
 
         if stopped_due_to_old_match:
             break
@@ -1716,6 +1484,9 @@ async def get_player_playtime(
     if skipped:
         confidence = "medium"
         notes.append("Some matches were skipped because metadata was missing or an API page failed.")
+
+    if agent_lookup_errors:
+        notes.append("Some match details could not be fetched for agent-role enrichment.")
 
     if not stopped_due_to_old_match and len(counted) >= page_size * max_pages:
         confidence = "medium"
@@ -1741,8 +1512,10 @@ async def get_player_playtime(
         "matches_skipped": len(skipped),
         "daily_breakdown": daily,
         "mode_breakdown": modes,
+        "agent_counts": agent_counts,
         "matches": counted,
         "skipped": skipped[:20],
+        "agent_lookup_errors": agent_lookup_errors[:20],
         "confidence": confidence,
         "notes": notes,
     }
@@ -1784,9 +1557,11 @@ async def get_player_playtime_audit(
         "total_playtime_hhmmss": report.get("total_playtime_hhmmss"),
         "matches_counted": report.get("matches_counted"),
         "matches_skipped": report.get("matches_skipped"),
+        "agent_counts": report.get("agent_counts", {}),
         "confidence": report.get("confidence"),
         "counted_matches": report.get("matches", []),
         "skipped_matches": report.get("skipped", []),
+        "agent_lookup_errors": report.get("agent_lookup_errors", []),
         "notes": report.get("notes", []),
     }
 
@@ -1843,6 +1618,7 @@ async def get_weekly_activity_report(
         "longest_day": longest_day,
         "daily_breakdown": daily,
         "mode_breakdown": report.get("mode_breakdown", {}),
+        "agent_counts": report.get("agent_counts", {}),
         "confidence": report.get("confidence"),
         "notes": report.get("notes", []),
         "audit_available": True,
@@ -1856,8 +1632,8 @@ async def get_weekly_activity_report(
 
 def main() -> None:
     """Start the Valorant MCP Server using HTTP transport."""
-    mcp.settings.host = "0.0.0.0"
-    mcp.settings.port = 8000
+    mcp.settings.host = os.getenv("MCP_HOST", "0.0.0.0")
+    mcp.settings.port = int(os.getenv("MCP_PORT", "8000"))
 
     mcp.run(transport="streamable-http")
 

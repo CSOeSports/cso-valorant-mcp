@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.codex-backup-*
+*.backup-*
+*.before-*
+.env
+.env*
+!.env-example
