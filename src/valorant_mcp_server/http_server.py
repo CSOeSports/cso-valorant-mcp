@@ -11,14 +11,12 @@ from valorant_mcp_server.server import mcp
 
 def main() -> None:
     host = os.getenv("MCP_HOST", "0.0.0.0")
-    port = int(os.getenv("MCP_PORT", "8001"))
+    port = int(os.getenv("MCP_PORT", "8000"))
     transport = os.getenv("MCP_TRANSPORT", "streamable-http")
 
-    mcp.run(
-        transport=transport,
-        host=host,
-        port=port,
-    )
+    mcp.settings.host = host
+    mcp.settings.port = port
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,10 @@ jobs:
         run: |
           uv run python - <<'PY'
           import asyncio
+          import os
+          from unittest.mock import patch
+
+          from valorant_mcp_server import http_server
           from valorant_mcp_server.server import mcp
 
           async def main():
@@ -43,6 +47,14 @@ jobs:
               print(f"Registered {len(tools)} MCP tools")
 
           asyncio.run(main())
+
+          os.environ["MCP_HOST"] = "127.0.0.1"
+          os.environ["MCP_PORT"] = "8123"
+          with patch.object(http_server.mcp, "run") as run:
+              http_server.main()
+              run.assert_called_once_with(transport="streamable-http")
+              assert http_server.mcp.settings.host == "127.0.0.1"
+              assert http_server.mcp.settings.port == 8123
           PY
 
       - name: Build Docker image
