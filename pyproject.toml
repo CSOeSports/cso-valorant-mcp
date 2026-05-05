@@ -11,6 +11,7 @@ dependencies = [
 
 [project.scripts]
 valorant-mcp-server = "valorant_mcp_server.server:main"
+valorant-mcp-http = "valorant_mcp_server.http_server:main"
 
 [build-system]
 requires = ["hatchling"]
