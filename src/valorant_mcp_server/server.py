@@ -543,6 +543,179 @@ async def analyze_match(region: Region, match_id: str, player_name: str | None =
         "target_player": target,
     }
 
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def audit_match_rounds(
+    region: Region,
+    match_id: str,
+    player_name: str | None = None,
+    player_tag: str | None = None,
+    puuid: str | None = None,
+) -> dict[str, Any]:
+    """Return a round-by-round audit breakdown for a Valorant match.
+
+    Optionally focuses on a specific player using either name+tag or puuid.
+    Includes round winner, win condition, kill flow, spike events, economy,
+    ability casts, and target-player round impact where available.
+    """
+    full = await matches.get_match(region, match_id)
+    meta = _match_meta(full)
+
+    rounds = (
+        _safe_get(full, "data", "rounds", default=None)
+        or full.get("rounds")
+        or []
+    )
+
+    if not isinstance(rounds, list):
+        rounds = []
+
+    audited_rounds: list[dict[str, Any]] = []
+
+    for index, round_data in enumerate(rounds, start=1):
+        if not isinstance(round_data, dict):
+            continue
+
+        kills = round_data.get("kills") or []
+        player_stats = round_data.get("player_stats") or []
+
+        kill_flow: list[dict[str, Any]] = []
+        first_kill: dict[str, Any] | None = None
+
+        if isinstance(kills, list):
+            for kill in kills:
+                if not isinstance(kill, dict):
+                    continue
+
+                finishing_damage = kill.get("finishing_damage") or {}
+                weapon = (
+                    kill.get("damage_weapon_name")
+                    or finishing_damage.get("damage_item")
+                    or finishing_damage.get("damage_item_name")
+                )
+
+                kill_event = {
+                    "time_in_round_ms": kill.get("kill_time_in_round"),
+                    "killer": (
+                        kill.get("killer_display_name")
+                        or kill.get("killer_puuid")
+                    ),
+                    "victim": (
+                        kill.get("victim_display_name")
+                        or kill.get("victim_puuid")
+                    ),
+                    "assistants": (
+                        kill.get("assistant_display_names")
+                        or kill.get("assistants")
+                        or []
+                    ),
+                    "weapon": weapon,
+                    "damage_type": finishing_damage.get("damage_type"),
+                    "is_headshot": finishing_damage.get("damage_type") == "HeadShot",
+                }
+
+                kill_flow.append(kill_event)
+
+            kill_flow.sort(
+                key=lambda item: (
+                    item["time_in_round_ms"] is None,
+                    item["time_in_round_ms"] or 0,
+                )
+            )
+            first_kill = kill_flow[0] if kill_flow else None
+
+        plant_events = round_data.get("plant_events") or round_data.get("plant")
+        defuse_events = round_data.get("defuse_events") or round_data.get("defuse")
+
+        target_round_stats = None
+
+        if isinstance(player_stats, list):
+            for player in player_stats:
+                if not isinstance(player, dict):
+                    continue
+
+                found_target = False
+
+                if puuid and player.get("puuid") == puuid:
+                    found_target = True
+                elif player_name and player_tag:
+                    display_name = str(
+                        player.get("player_display_name")
+                        or player.get("name")
+                        or ""
+                    ).lower()
+                    display_tag = str(
+                        player.get("player_display_tag")
+                        or player.get("tag")
+                        or ""
+                    ).lower()
+
+                    found_target = (
+                        display_name == player_name.lower()
+                        and display_tag == player_tag.lower()
+                    )
+
+                if not found_target:
+                    continue
+
+                economy = player.get("economy") or {}
+                ability_casts = player.get("ability_casts") or {}
+
+                target_round_stats = {
+                    "player": (
+                        player.get("player_display_name")
+                        or player.get("name")
+                        or player.get("puuid")
+                    ),
+                    "puuid": player.get("puuid"),
+                    "score": player.get("score"),
+                    "damage": player.get("damage"),
+                    "kills": len(player.get("kills") or []),
+                    "economy": {
+                        "loadout_value": economy.get("loadout_value"),
+                        "remaining_credits": economy.get("remaining"),
+                        "spent": economy.get("spent"),
+                        "weapon": (
+                            (economy.get("weapon") or {}).get("name")
+                            if isinstance(economy.get("weapon"), dict)
+                            else economy.get("weapon")
+                        ),
+                        "armor": (
+                            (economy.get("armor") or {}).get("name")
+                            if isinstance(economy.get("armor"), dict)
+                            else economy.get("armor")
+                        ),
+                    },
+                    "ability_casts": ability_casts,
+                }
+                break
+
+        audited_rounds.append(
+            {
+                "round_number": index,
+                "winning_team": round_data.get("winning_team"),
+                "end_type": round_data.get("end_type"),
+                "bomb_planted": bool(plant_events),
+                "bomb_defused": bool(defuse_events),
+                "plant_events": plant_events,
+                "defuse_events": defuse_events,
+                "first_kill": first_kill,
+                "kill_count": len(kill_flow),
+                "kill_flow": kill_flow,
+                "target_player": target_round_stats,
+            }
+        )
+
+    return {
+        "match_id": match_id,
+        "map": _map_name_from_match(full),
+        "metadata": meta,
+        "rounds_count": len(audited_rounds),
+        "rounds": audited_rounds,
+        "notes": [
+            "Round audit is based on the Henrik match payload.",
+            "Field availability may vary by Henrik API version and match type.",
+        ],
+    }
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def detect_common_mistakes(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 10) -> dict[str, Any]:
