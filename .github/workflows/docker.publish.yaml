@@ -60,6 +60,14 @@ jobs:
                   "get_consistency_score",
                   "get_trial_readiness_score",
                   "compare_players",
+                  "get_match_rounds_summary",
+                  "get_match_round",
+                  "get_match_events_compact",
+                  "get_match_player_impact_summary",
+                  "get_match_team_economy_summary",
+                  "get_match_opening_duels",
+                  "get_player_map_pool_last_n",
+                  "get_player_agent_pool_last_n",
               }
               assert required_tools <= tool_names, required_tools - tool_names
               assert "valorant://agents" in resource_uris

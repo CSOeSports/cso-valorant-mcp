@@ -45,7 +45,29 @@ jobs:
         run: uv run python -m compileall src
 
       - name: Check package import
-        run: uv run python -c "import valorant_mcp_server.server; print('valorant_mcp_server import ok')"
+        run: |
+          uv run python - <<'PY'
+          import asyncio
+          import valorant_mcp_server.server as server
+
+          async def main():
+              tools = await server.mcp.list_tools()
+              names = {tool.name for tool in tools}
+              required = {
+                  "get_match_rounds_summary",
+                  "get_match_round",
+                  "get_match_events_compact",
+                  "get_match_player_impact_summary",
+                  "get_match_team_economy_summary",
+                  "get_match_opening_duels",
+                  "get_player_map_pool_last_n",
+                  "get_player_agent_pool_last_n",
+              }
+              assert required <= names, required - names
+              print("valorant_mcp_server import ok")
+
+          asyncio.run(main())
+          PY
         env:
           HENRIK_API_KEY: ci-placeholder
 
