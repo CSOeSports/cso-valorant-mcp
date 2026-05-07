@@ -16,7 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/cso-valorant-mcp
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  IMAGE_NAME: ghcr.io/csoesports/cso-valorant-mcp
 
 jobs:
   build-test-image:
