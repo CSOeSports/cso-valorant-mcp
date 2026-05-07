@@ -43,7 +43,25 @@ jobs:
 
           async def main():
               tools = await mcp.list_tools()
+              resources = await mcp.list_resources()
               assert tools, "No MCP tools registered"
+              tool_names = {tool.name for tool in tools}
+              resource_uris = {str(resource.uri) for resource in resources}
+              required_tools = {
+                  "get_rank",
+                  "get_rank_history",
+                  "get_match_details",
+                  "get_live_status",
+                  "get_static_content",
+                  "get_player_activity_report",
+                  "get_weekly_activity_report",
+                  "get_role_profile",
+                  "get_consistency_score",
+                  "get_trial_readiness_score",
+                  "compare_players",
+              }
+              assert required_tools <= tool_names, required_tools - tool_names
+              assert "valorant://agents" in resource_uris
               print(f"Registered {len(tools)} MCP tools")
 
           asyncio.run(main())

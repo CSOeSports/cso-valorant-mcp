@@ -13,6 +13,7 @@ Usage:
   uv run mcp dev src/valorant_mcp_server/server.py  # MCP Inspector
 """
 
+import json
 import os
 from typing import Any
 from mcp.types import ToolAnnotations
@@ -652,6 +653,82 @@ async def identify_consistent_players(region: Region, candidates: list[dict[str,
     return found
 
 
+# ---------------------------------------------------------------------------
+# CSO-Aligned Friendly Tool Names
+# ---------------------------------------------------------------------------
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_rank(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+) -> dict[str, Any]:
+    """Retrieve current Valorant rank using the shared CSO rank tool name."""
+    return await get_mmr_v3(region, name, tag, platform)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_rank_history(
+    region: Region,
+    puuid: str,
+    platform: Platform = "pc",
+) -> dict[str, Any]:
+    """Retrieve Valorant ranked rating history using the shared CSO rank-history tool name."""
+    return await get_mmr_history_by_puuid(region, puuid, platform)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_match_details(region: Region, match_id: str) -> dict[str, Any]:
+    """Retrieve Valorant match details using the shared CSO match-details tool name."""
+    return await get_match_details_v4(region, match_id)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_live_status(region: Region) -> dict[str, Any]:
+    """Retrieve Valorant platform status using the shared CSO status tool name."""
+    return await get_server_status(region)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_static_content(content: str = "agents", locale: str | None = None) -> dict[str, Any]:
+    """Retrieve static Valorant content using the shared CSO static-content tool name."""
+    content_map = {
+        "agents": "characters",
+        "characters": "characters",
+        "maps": "maps",
+        "skins": "skins",
+        "sprays": "sprays",
+        "buddies": "buddies",
+        "player_cards": "playerCards",
+        "player_titles": "playerTitles",
+        "seasons": "seasons",
+        "game_modes": "gameModes",
+    }
+    payload = await get_valorant_content(locale)
+    key = content_map.get(content)
+    if not key:
+        return {
+            "error": True,
+            "message": f"Unsupported content type: {content}",
+            "supported_content": sorted(content_map),
+        }
+    return _content_slice(payload, key)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_player_activity_report(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+    days: int = 7,
+    mode: str | None = None,
+    page_size: int = 10,
+    max_pages: int = 10,
+) -> dict[str, Any]:
+    """CSO player activity report using the shared activity-report tool name."""
+    return await get_player_playtime(region, name, tag, platform, days, mode, page_size, max_pages)
 
 
 # ---------------------------------------------------------------------------
@@ -730,6 +807,26 @@ async def get_seasons(locale: str | None = None) -> dict[str, Any]:
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_game_modes(locale: str | None = None) -> dict[str, Any]:
     return _content_slice(await get_valorant_content(locale), "gameModes")
+
+
+@mcp.resource("valorant://agents", description="Valorant agent static content")
+async def valorant_agents_resource() -> str:
+    return json.dumps(await get_agents(), indent=2, ensure_ascii=False)
+
+
+@mcp.resource("valorant://maps", description="Valorant map static content")
+async def valorant_maps_resource() -> str:
+    return json.dumps(await get_maps(), indent=2, ensure_ascii=False)
+
+
+@mcp.resource("valorant://seasons", description="Valorant season and act static content")
+async def valorant_seasons_resource() -> str:
+    return json.dumps(await get_seasons(), indent=2, ensure_ascii=False)
+
+
+@mcp.resource("valorant://game_modes", description="Valorant game mode static content")
+async def valorant_game_modes_resource() -> str:
+    return json.dumps(await get_game_modes(), indent=2, ensure_ascii=False)
 
 
 # Matches
