@@ -55,6 +55,15 @@ from valorant_mcp_server.match_utils import (
     safe_get as _safe_get,
     team_won as _team_won,
 )
+from valorant_mcp_server.round_tools import (
+    compact_events as _compact_events,
+    one_round as _one_round,
+    opening_duels as _opening_duels,
+    player_impact_summary as _player_impact_summary,
+    rollup_history as _rollup_history,
+    rounds_summary as _rounds_summary,
+    team_economy_summary as _team_economy_summary,
+)
 from valorant_mcp_server.tools import accounts, leaderboard, matches, mmr, esports
 
 def _csv_env(name: str, defaults: list[str]) -> list[str]:
@@ -293,6 +302,227 @@ async def get_match(
         match_id: Match UUID (e.g. '696848f3-f16f-45bf-af13-e2192f81a600').
     """
     return await matches.get_match(region, match_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+async def get_match_rounds_summary(
+    region: Region,
+    match_id: str,
+    include_kills: bool = False,
+    include_economy: bool = False,
+) -> dict[str, Any]:
+    """Return compact, non-truncating summaries for every round in a match.
+
+    Rounds are returned as 1-indexed round_number values. Killfeed arrays,
+    player loadouts, and per-player damage events are excluded.
+    """
+    full = await matches.get_match(region, match_id)
+    return _rounds_summary(
+        full,
+        region,
+        include_kills=include_kills,
+        include_economy=include_economy,
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+async def get_match_round(
+    region: Region,
+    match_id: str,
+    round_number: int | None = None,
+    round_id: int | None = None,
+    include_killfeed: bool = False,
+    include_player_stats: bool = False,
+) -> dict[str, Any]:
+    """Return one compact round by 1-indexed round_number or 0-indexed round_id."""
+    full = await matches.get_match(region, match_id)
+    return _one_round(
+        full,
+        region,
+        round_number=round_number,
+        round_id=round_id,
+        include_killfeed=include_killfeed,
+        include_player_stats=include_player_stats,
+    )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+async def get_match_events_compact(region: Region, match_id: str) -> dict[str, Any]:
+    """Return plants, defuses, and round-end events only; no kills."""
+    full = await matches.get_match(region, match_id)
+    return _compact_events(full, region)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+async def get_match_player_impact_summary(
+    region: Region,
+    match_id: str,
+    puuid: str | None = None,
+    name: str | None = None,
+    tag: str | None = None,
+) -> dict[str, Any]:
+    """Return a compact coaching impact summary for one player in a match."""
+    full = await matches.get_match(region, match_id)
+    return _player_impact_summary(full, region, puuid=puuid, name=name, tag=tag)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+async def get_match_team_economy_summary(region: Region, match_id: str) -> dict[str, Any]:
+    """Return round-by-round team economy, eco wins, and bonus conversions."""
+    full = await matches.get_match(region, match_id)
+    return _team_economy_summary(full, region)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+async def get_match_opening_duels(region: Region, match_id: str) -> dict[str, Any]:
+    """Return first kill/death and conversion context for each round."""
+    full = await matches.get_match(region, match_id)
+    return _opening_duels(full, region)
+
+
+async def _player_last_n_rows(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform,
+    n_matches: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    history = await matches.get_match_history(
+        region,
+        name,
+        tag,
+        platform=platform,
+        mode="competitive",
+        size=max(1, min(n_matches, 20)),
+    )
+    if not isinstance(history, list):
+        return [], {
+            "error": True,
+            "message": "Could not retrieve player match history",
+            "response": history,
+        }
+
+    rows: list[dict[str, Any]] = []
+    for item in history[: max(1, min(n_matches, 20))]:
+        match_id = _extract_match_id(item)
+        if not match_id:
+            continue
+        full = await matches.get_match(region, match_id)
+        player_row = _find_player_in_match(full, name=name, tag=tag)
+        if not player_row:
+            continue
+        stats = _player_stats(player_row)
+        rows.append(
+            {
+                "match_id": match_id,
+                "map": _map_name_from_match(full),
+                "agent": _agent_name(player_row),
+                "won": _team_won(player_row, full),
+                "kills": stats["kills"],
+                "deaths": stats["deaths"],
+                "assists": stats["assists"],
+                "score": stats["score"],
+            }
+        )
+    return rows, None
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+async def get_player_map_pool_last_n(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+    n_matches: int = 10,
+) -> dict[str, Any]:
+    """Summarize player performance by map over the last N competitive matches."""
+    rows, error = await _player_last_n_rows(region, name, tag, platform, n_matches)
+    return {
+        "region": region,
+        "player": f"{name}#{tag}",
+        "platform": platform,
+        "matches_requested": max(1, min(n_matches, 20)),
+        "matches_counted": len(rows),
+        "history_error": error,
+        **_rollup_history(rows, group_by="map"),
+    }
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+async def get_player_agent_pool_last_n(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+    n_matches: int = 10,
+) -> dict[str, Any]:
+    """Summarize player performance by agent over the last N competitive matches."""
+    rows, error = await _player_last_n_rows(region, name, tag, platform, n_matches)
+    return {
+        "region": region,
+        "player": f"{name}#{tag}",
+        "platform": platform,
+        "matches_requested": max(1, min(n_matches, 20)),
+        "matches_counted": len(rows),
+        "history_error": error,
+        **_rollup_history(rows, group_by="agent"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +773,179 @@ async def analyze_match(region: Region, match_id: str, player_name: str | None =
         "target_player": target,
     }
 
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def audit_match_rounds(
+    region: Region,
+    match_id: str,
+    player_name: str | None = None,
+    player_tag: str | None = None,
+    puuid: str | None = None,
+) -> dict[str, Any]:
+    """Return a round-by-round audit breakdown for a Valorant match.
+
+    Optionally focuses on a specific player using either name+tag or puuid.
+    Includes round winner, win condition, kill flow, spike events, economy,
+    ability casts, and target-player round impact where available.
+    """
+    full = await matches.get_match(region, match_id)
+    meta = _match_meta(full)
+
+    rounds = (
+        _safe_get(full, "data", "rounds", default=None)
+        or full.get("rounds")
+        or []
+    )
+
+    if not isinstance(rounds, list):
+        rounds = []
+
+    audited_rounds: list[dict[str, Any]] = []
+
+    for index, round_data in enumerate(rounds, start=1):
+        if not isinstance(round_data, dict):
+            continue
+
+        kills = round_data.get("kills") or []
+        player_stats = round_data.get("player_stats") or []
+
+        kill_flow: list[dict[str, Any]] = []
+        first_kill: dict[str, Any] | None = None
+
+        if isinstance(kills, list):
+            for kill in kills:
+                if not isinstance(kill, dict):
+                    continue
+
+                finishing_damage = kill.get("finishing_damage") or {}
+                weapon = (
+                    kill.get("damage_weapon_name")
+                    or finishing_damage.get("damage_item")
+                    or finishing_damage.get("damage_item_name")
+                )
+
+                kill_event = {
+                    "time_in_round_ms": kill.get("kill_time_in_round"),
+                    "killer": (
+                        kill.get("killer_display_name")
+                        or kill.get("killer_puuid")
+                    ),
+                    "victim": (
+                        kill.get("victim_display_name")
+                        or kill.get("victim_puuid")
+                    ),
+                    "assistants": (
+                        kill.get("assistant_display_names")
+                        or kill.get("assistants")
+                        or []
+                    ),
+                    "weapon": weapon,
+                    "damage_type": finishing_damage.get("damage_type"),
+                    "is_headshot": finishing_damage.get("damage_type") == "HeadShot",
+                }
+
+                kill_flow.append(kill_event)
+
+            kill_flow.sort(
+                key=lambda item: (
+                    item["time_in_round_ms"] is None,
+                    item["time_in_round_ms"] or 0,
+                )
+            )
+            first_kill = kill_flow[0] if kill_flow else None
+
+        plant_events = round_data.get("plant_events") or round_data.get("plant")
+        defuse_events = round_data.get("defuse_events") or round_data.get("defuse")
+
+        target_round_stats = None
+
+        if isinstance(player_stats, list):
+            for player in player_stats:
+                if not isinstance(player, dict):
+                    continue
+
+                found_target = False
+
+                if puuid and player.get("puuid") == puuid:
+                    found_target = True
+                elif player_name and player_tag:
+                    display_name = str(
+                        player.get("player_display_name")
+                        or player.get("name")
+                        or ""
+                    ).lower()
+                    display_tag = str(
+                        player.get("player_display_tag")
+                        or player.get("tag")
+                        or ""
+                    ).lower()
+
+                    found_target = (
+                        display_name == player_name.lower()
+                        and display_tag == player_tag.lower()
+                    )
+
+                if not found_target:
+                    continue
+
+                economy = player.get("economy") or {}
+                ability_casts = player.get("ability_casts") or {}
+
+                target_round_stats = {
+                    "player": (
+                        player.get("player_display_name")
+                        or player.get("name")
+                        or player.get("puuid")
+                    ),
+                    "puuid": player.get("puuid"),
+                    "score": player.get("score"),
+                    "damage": player.get("damage"),
+                    "kills": len(player.get("kills") or []),
+                    "economy": {
+                        "loadout_value": economy.get("loadout_value"),
+                        "remaining_credits": economy.get("remaining"),
+                        "spent": economy.get("spent"),
+                        "weapon": (
+                            (economy.get("weapon") or {}).get("name")
+                            if isinstance(economy.get("weapon"), dict)
+                            else economy.get("weapon")
+                        ),
+                        "armor": (
+                            (economy.get("armor") or {}).get("name")
+                            if isinstance(economy.get("armor"), dict)
+                            else economy.get("armor")
+                        ),
+                    },
+                    "ability_casts": ability_casts,
+                }
+                break
+
+        audited_rounds.append(
+            {
+                "round_number": index,
+                "winning_team": round_data.get("winning_team"),
+                "end_type": round_data.get("end_type"),
+                "bomb_planted": bool(plant_events),
+                "bomb_defused": bool(defuse_events),
+                "plant_events": plant_events,
+                "defuse_events": defuse_events,
+                "first_kill": first_kill,
+                "kill_count": len(kill_flow),
+                "kill_flow": kill_flow,
+                "target_player": target_round_stats,
+            }
+        )
+
+    return {
+        "match_id": match_id,
+        "map": _map_name_from_match(full),
+        "metadata": meta,
+        "rounds_count": len(audited_rounds),
+        "rounds": audited_rounds,
+        "notes": [
+            "Round audit is based on the Henrik match payload.",
+            "Field availability may vary by Henrik API version and match type.",
+        ],
+    }
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def detect_common_mistakes(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 10) -> dict[str, Any]:
