@@ -75,6 +75,145 @@ def _csv_env(name: str, defaults: list[str]) -> list[str]:
     return items or defaults
 
 
+def _clamped_matchlist_size(size: int | None, *, default: int = 3, max_size: int = 5) -> int:
+    try:
+        requested = int(size) if size is not None else default
+    except Exception:
+        requested = default
+    return max(1, min(requested, max_size))
+
+
+def _data_list(payload: Any) -> list[dict[str, Any]]:
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    if isinstance(data, dict):
+        data = data.get("matches") or data.get("history") or data.get("data")
+    return [item for item in data or [] if isinstance(item, dict)] if isinstance(data, list) else []
+
+
+def _display_name(value: Any) -> Any:
+    if isinstance(value, dict):
+        return value.get("name") or value.get("displayName") or value.get("id")
+    return value
+
+
+def _team_score_summary(item: dict[str, Any]) -> dict[str, Any] | None:
+    teams = (
+        _safe_get(item, "data", "teams", default=None)
+        or item.get("teams")
+        or _safe_get(item, "metadata", "teams", default=None)
+    )
+    if not teams:
+        return None
+
+    if isinstance(teams, dict):
+        summary: dict[str, Any] = {}
+        for key, value in teams.items():
+            if not isinstance(value, dict):
+                continue
+            rounds = value.get("rounds") or {}
+            summary[str(key)] = {
+                "rounds_won": rounds.get("won") if isinstance(rounds, dict) else value.get("rounds_won"),
+                "has_won": value.get("has_won"),
+            }
+        return summary or None
+
+    if isinstance(teams, list):
+        summary = {}
+        for value in teams:
+            if not isinstance(value, dict):
+                continue
+            team_id = value.get("team_id") or value.get("teamId") or value.get("team")
+            if not team_id:
+                continue
+            rounds = value.get("rounds") or {}
+            summary[str(team_id)] = {
+                "rounds_won": rounds.get("won") if isinstance(rounds, dict) else value.get("rounds_won"),
+                "has_won": value.get("has_won"),
+            }
+        return summary or None
+
+    return None
+
+
+def _compact_match_history_item(
+    item: dict[str, Any],
+    *,
+    region: Region,
+    platform: Platform | None = None,
+    target_puuid: str | None = None,
+) -> dict[str, Any]:
+    meta = item.get("metadata") or item.get("meta") or _safe_get(item, "data", "metadata", default={}) or {}
+    started_at = _extract_match_started_at(item)
+    target_row = _find_player_in_match(item, puuid=target_puuid) if target_puuid else None
+
+    compact: dict[str, Any] = {
+        "match_id": _extract_match_id(item),
+        "region": region,
+        "platform": platform or meta.get("platform"),
+        "map": _display_name(meta.get("map")) or meta.get("map_name") or meta.get("mapName"),
+        "mode": _extract_queue_name(item),
+        "started_at": started_at.isoformat() if started_at else meta.get("started_at") or meta.get("game_start_patched"),
+        "game_length_seconds": _extract_match_length_seconds(item),
+        "team_score": _team_score_summary(item),
+    }
+
+    if target_row:
+        compact["player"] = {
+            "puuid": target_row.get("puuid"),
+            "name": _player_identity(target_row),
+            "agent": _agent_name(target_row),
+            "team": target_row.get("team") or target_row.get("team_id") or target_row.get("teamId"),
+            "won": _team_won(target_row, item),
+            **_player_stats(target_row),
+        }
+
+    return {key: value for key, value in compact.items() if value is not None}
+
+
+def _compact_match_history_response(
+    payload: dict[str, Any],
+    *,
+    region: Region,
+    platform: Platform | None,
+    requested_size: int,
+    target_puuid: str | None = None,
+    source_tool: str,
+) -> dict[str, Any]:
+    if payload.get("error"):
+        return {
+            "error": True,
+            "source_tool": source_tool,
+            "requested_size": requested_size,
+            "message": payload.get("message"),
+            "path": payload.get("path"),
+            "status_code": payload.get("status_code"),
+        }
+
+    rows = _data_list(payload)
+    trimmed = [
+        _compact_match_history_item(
+            item,
+            region=region,
+            platform=platform,
+            target_puuid=target_puuid,
+        )
+        for item in rows[:requested_size]
+    ]
+
+    return {
+        "source_tool": source_tool,
+        "region": region,
+        "platform": platform,
+        "requested_size": requested_size,
+        "matches_returned": len(trimmed),
+        "matches": trimmed,
+        "notes": [
+            "Trimmed match-history response for Notion/LLM agents.",
+            "Use get_match_details_v4 or round-summary tools only for a selected match_id.",
+        ],
+    }
+
+
 DEFAULT_ALLOWED_HOSTS = [
     "localhost",
     "localhost:*",
@@ -1268,6 +1407,66 @@ async def get_match_history_by_puuid(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_match_history_v4_trimmed(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+    mode: str | None = None,
+    map_name: str | None = None,
+    size: int | None = 3,
+    start: int | None = None,
+) -> dict[str, Any]:
+    """Return a compact v4 match-history page by Riot ID for Notion/LLM agents.
+
+    The response is hard-capped to five matches and removes the large nested
+    match/player payload. Fetch detailed data only after selecting a match_id.
+    """
+    safe_size = _clamped_matchlist_size(size)
+    payload = await _henrik_get(
+        f"/valorant/v4/matches/{region}/{platform}/{name}/{tag}",
+        {"mode": mode, "map": map_name, "size": safe_size, "start": start},
+    )
+    return _compact_match_history_response(
+        payload,
+        region=region,
+        platform=platform,
+        requested_size=safe_size,
+        source_tool="get_match_history_v4_trimmed",
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_match_history_by_puuid_trimmed(
+    region: Region,
+    puuid: str,
+    platform: Platform = "pc",
+    mode: str | None = None,
+    map_name: str | None = None,
+    size: int | None = 3,
+    start: int | None = None,
+) -> dict[str, Any]:
+    """Return a compact v4 match-history page by PUUID for Notion/LLM agents.
+
+    Use this instead of get_match_history_by_puuid when a runtime cannot accept
+    large first-call payloads. The response is hard-capped to five matches.
+    """
+    safe_size = _clamped_matchlist_size(size)
+    payload = await _henrik_get(
+        f"/valorant/v4/by-puuid/matches/{region}/{platform}/{puuid}",
+        {"mode": mode, "map": map_name, "size": safe_size, "start": start},
+    )
+    return _compact_match_history_response(
+        payload,
+        region=region,
+        platform=platform,
+        requested_size=safe_size,
+        target_puuid=puuid,
+        source_tool="get_match_history_by_puuid_trimmed",
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def get_match_details_v4(region: Region, match_id: str) -> dict[str, Any]:
     return await _henrik_get(f"/valorant/v4/match/{region}/{match_id}")
 
@@ -1305,6 +1504,31 @@ async def get_stored_matches_by_puuid(
     return await _henrik_get(
         f"/valorant/v1/by-puuid/stored-matches/{region}/{puuid}",
         {"mode": mode, "map": map_name, "page": page, "size": size},
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_stored_matches_by_puuid_trimmed(
+    region: Region,
+    puuid: str,
+    mode: str | None = None,
+    map_name: str | None = None,
+    page: int | None = None,
+    size: int | None = 3,
+) -> dict[str, Any]:
+    """Return compact stored matches by PUUID with a small, Notion-safe cap."""
+    safe_size = _clamped_matchlist_size(size)
+    payload = await _henrik_get(
+        f"/valorant/v1/by-puuid/stored-matches/{region}/{puuid}",
+        {"mode": mode, "map": map_name, "page": page, "size": safe_size},
+    )
+    return _compact_match_history_response(
+        payload,
+        region=region,
+        platform=None,
+        requested_size=safe_size,
+        target_puuid=puuid,
+        source_tool="get_stored_matches_by_puuid_trimmed",
     )
 
 
