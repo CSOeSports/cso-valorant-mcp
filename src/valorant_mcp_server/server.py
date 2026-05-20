@@ -38,6 +38,7 @@ from valorant_mcp_server.cso_utils import (
     extract_match_started_at as _extract_match_started_at,
     extract_queue_name as _extract_queue_name,
     format_hhmmss as _format_hhmmss,
+    parse_iso_datetime as _parse_iso_datetime,
     playtime_window as _playtime_window,
 )
 from valorant_mcp_server.henrik import (
@@ -212,6 +213,325 @@ def _compact_match_history_response(
             "Use get_match_details_v4 or round-summary tools only for a selected match_id.",
         ],
     }
+
+
+def _safe_int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _first_stat_value(row: dict[str, Any], *keys: str) -> Any:
+    stats = row.get("stats") if isinstance(row.get("stats"), dict) else {}
+    damage = stats.get("damage") if isinstance(stats.get("damage"), dict) else {}
+    shots = stats.get("shots") if isinstance(stats.get("shots"), dict) else {}
+    sources = (row, stats, damage, shots)
+    for key in keys:
+        for source in sources:
+            if key in source and source[key] is not None:
+                return source[key]
+    return None
+
+
+def _shot_counts_from_row(row: dict[str, Any]) -> dict[str, int | None]:
+    headshots = _first_stat_value(row, "headshots", "head_shots", "headshot_hits", "head")
+    bodyshots = _first_stat_value(row, "bodyshots", "body_shots", "bodyshot_hits", "body")
+    legshots = _first_stat_value(row, "legshots", "leg_shots", "legshot_hits", "leg")
+
+    if headshots is None and bodyshots is None and legshots is None:
+        return {"headshots": None, "bodyshots": None, "legshots": None}
+
+    return {
+        "headshots": _safe_int_value(headshots),
+        "bodyshots": _safe_int_value(bodyshots),
+        "legshots": _safe_int_value(legshots),
+    }
+
+
+def _iter_round_player_stats(match: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    rounds = _safe_get(match, "data", "rounds", default=None) or match.get("rounds") or []
+    for round_row in rounds if isinstance(rounds, list) else []:
+        if not isinstance(round_row, dict):
+            continue
+        for stat in round_row.get("stats") or round_row.get("player_stats") or []:
+            if isinstance(stat, dict):
+                rows.append(stat)
+    return rows
+
+
+def _shot_counts_from_round_stats(match: dict[str, Any], target_puuid: str | None) -> dict[str, int | None]:
+    if not target_puuid:
+        return {"headshots": None, "bodyshots": None, "legshots": None}
+
+    totals = {"headshots": 0, "bodyshots": 0, "legshots": 0}
+    found = False
+    for stat in _iter_round_player_stats(match):
+        player = stat.get("player") if isinstance(stat.get("player"), dict) else stat
+        if player.get("puuid") != target_puuid and stat.get("puuid") != target_puuid:
+            continue
+
+        counts = _shot_counts_from_row(stat)
+        if all(value is None for value in counts.values()):
+            for event in stat.get("damage_events") or []:
+                if not isinstance(event, dict):
+                    continue
+                totals["headshots"] += _safe_int_value(event.get("headshots") or event.get("head_shots"))
+                totals["bodyshots"] += _safe_int_value(event.get("bodyshots") or event.get("body_shots"))
+                totals["legshots"] += _safe_int_value(event.get("legshots") or event.get("leg_shots"))
+            found = found or any(totals.values())
+        else:
+            found = True
+            for key, value in counts.items():
+                totals[key] += _safe_int_value(value)
+
+    return totals if found else {"headshots": None, "bodyshots": None, "legshots": None}
+
+
+def _merge_shot_counts(primary: dict[str, int | None], fallback: dict[str, int | None]) -> dict[str, int | None]:
+    if any(value is not None for value in primary.values()):
+        return primary
+    return fallback
+
+
+def _headshot_rate(shots: dict[str, int | None]) -> float | None:
+    if any(value is None for value in shots.values()):
+        return None
+    total = sum(_safe_int_value(value) for value in shots.values())
+    if not total:
+        return None
+    return round(_safe_int_value(shots["headshots"]) / total, 3)
+
+
+def _round_count(match: dict[str, Any]) -> int:
+    rounds = _safe_get(match, "data", "rounds", default=None) or match.get("rounds") or []
+    if isinstance(rounds, list) and rounds:
+        return len(rounds)
+    score = _team_score_summary(match) or {}
+    total = 0
+    for team in score.values():
+        if isinstance(team, dict):
+            total += _safe_int_value(team.get("rounds_won"))
+    return max(total, 1)
+
+
+def _team_won_any(row: dict[str, Any], match: dict[str, Any]) -> bool | None:
+    won = _team_won(row, match)
+    if won is not None:
+        return won
+
+    team_id = row.get("team") or row.get("team_id") or row.get("teamId")
+    if not team_id:
+        return None
+
+    teams = _safe_get(match, "data", "teams", default=None) or match.get("teams") or []
+    if isinstance(teams, list):
+        for team in teams:
+            if not isinstance(team, dict):
+                continue
+            current = team.get("team_id") or team.get("teamId") or team.get("team")
+            if str(current).lower() == str(team_id).lower() and team.get("has_won") is not None:
+                return bool(team.get("has_won"))
+    return None
+
+
+def _compact_player_match_stats(
+    match: dict[str, Any],
+    *,
+    region: Region,
+    puuid: str | None = None,
+    name: str | None = None,
+    tag: str | None = None,
+) -> dict[str, Any] | None:
+    row = _find_player_in_match(match, puuid=puuid, name=name, tag=tag)
+    if not row:
+        return None
+
+    stats = _player_stats(row)
+    rounds = _round_count(match)
+    score = _safe_int_value(stats.get("score"))
+    damage_dealt = _safe_int_value(_first_stat_value(row, "dealt", "damage_dealt", "damage"))
+    if damage_dealt == 0:
+        damage = row.get("damage") or {}
+        if isinstance(damage, dict):
+            damage_dealt = _safe_int_value(damage.get("dealt"))
+
+    target_puuid = row.get("puuid") or puuid
+    shots = _merge_shot_counts(
+        _shot_counts_from_row(row),
+        _shot_counts_from_round_stats(match, target_puuid),
+    )
+    won = _team_won_any(row, match)
+
+    return {
+        **_compact_match_history_item(match, region=region, target_puuid=target_puuid),
+        "player": _player_identity(row),
+        "puuid": target_puuid,
+        "agent": _agent_name(row),
+        "team": row.get("team") or row.get("team_id") or row.get("teamId"),
+        "won": won,
+        "rounds_count": rounds,
+        "kills": stats["kills"],
+        "deaths": stats["deaths"],
+        "assists": stats["assists"],
+        "score": score,
+        "acs": round(score / rounds) if rounds else None,
+        "damage_dealt": damage_dealt if damage_dealt else None,
+        "adr": round(damage_dealt / rounds, 1) if damage_dealt and rounds else None,
+        **shots,
+        "hs_pct": _headshot_rate(shots),
+    }
+
+
+def _aggregate_compact_player_matches(
+    matches_rows: list[dict[str, Any]],
+    *,
+    player: str,
+    region: Region,
+    platform: Platform,
+    days: int,
+    mode: str | None,
+    errors: list[dict[str, Any]],
+    include_matches: bool,
+) -> dict[str, Any]:
+    counted = [row for row in matches_rows if isinstance(row, dict)]
+    matches_count = len(counted)
+    wins = sum(1 for row in counted if row.get("won") is True)
+    losses = sum(1 for row in counted if row.get("won") is False)
+    kills = sum(_safe_int_value(row.get("kills")) for row in counted)
+    deaths = sum(_safe_int_value(row.get("deaths")) for row in counted)
+    assists = sum(_safe_int_value(row.get("assists")) for row in counted)
+    rounds = sum(_safe_int_value(row.get("rounds_count")) for row in counted)
+    score = sum(_safe_int_value(row.get("score")) for row in counted)
+    damage = sum(_safe_int_value(row.get("damage_dealt")) for row in counted)
+    headshots = sum(_safe_int_value(row.get("headshots")) for row in counted if row.get("headshots") is not None)
+    bodyshots = sum(_safe_int_value(row.get("bodyshots")) for row in counted if row.get("bodyshots") is not None)
+    legshots = sum(_safe_int_value(row.get("legshots")) for row in counted if row.get("legshots") is not None)
+    shot_total = headshots + bodyshots + legshots
+
+    output: dict[str, Any] = {
+        "player": player,
+        "region": region,
+        "platform": platform,
+        "window": {"days": days},
+        "mode_filter": mode,
+        "weekly_matches": matches_count,
+        "matches_counted": matches_count,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / matches_count, 3) if matches_count else None,
+        "kills": kills,
+        "deaths": deaths,
+        "assists": assists,
+        "kd": round(kills / max(deaths, 1), 2) if matches_count else None,
+        "acs": round(score / rounds) if rounds else None,
+        "adr": round(damage / rounds, 1) if damage and rounds else None,
+        "headshots": headshots if shot_total else None,
+        "bodyshots": bodyshots if shot_total else None,
+        "legshots": legshots if shot_total else None,
+        "hs_pct": round(headshots / shot_total, 3) if shot_total else None,
+        "errors": errors,
+        "confidence": "high" if matches_count and not errors else "medium" if matches_count else "low",
+    }
+    if include_matches:
+        output["matches"] = counted
+    return output
+
+
+async def _collect_player_window_stats(
+    *,
+    region: Region,
+    platform: Platform,
+    days: int,
+    mode: str | None,
+    page_size: int,
+    max_pages: int,
+    max_details: int,
+    name: str | None = None,
+    tag: str | None = None,
+    puuid: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    now, window_start = _playtime_window(max(1, int(days or 1)))
+    del now
+
+    page_size = max(1, min(int(page_size or 5), 10))
+    max_pages = max(1, min(int(max_pages or 4), 10))
+    max_details = max(1, min(int(max_details or 20), 50))
+
+    rows: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    seen_match_ids: set[str] = set()
+
+    for page in range(max_pages):
+        start = page * page_size
+        if puuid:
+            history = await get_match_history_by_puuid_trimmed(
+                region=region,
+                puuid=puuid,
+                platform=platform,
+                mode=mode,
+                size=page_size,
+                start=start,
+            )
+        elif name and tag:
+            history = await get_match_history_v4_trimmed(
+                region=region,
+                name=name,
+                tag=tag,
+                platform=platform,
+                mode=mode,
+                size=page_size,
+                start=start,
+            )
+        else:
+            return rows, [{"reason": "missing_identifier", "message": "Provide puuid or name+tag."}]
+
+        if history.get("error"):
+            errors.append({"reason": "history_error", "page": page, "payload": history})
+            break
+
+        history_rows = history.get("matches") or []
+        if not isinstance(history_rows, list) or not history_rows:
+            break
+
+        reached_old_match = False
+        for item in history_rows:
+            if not isinstance(item, dict):
+                continue
+            started_at = _parse_iso_datetime(item.get("started_at"))
+            if started_at and started_at < window_start:
+                reached_old_match = True
+                continue
+
+            match_id = item.get("match_id")
+            if not match_id or match_id in seen_match_ids:
+                continue
+            seen_match_ids.add(match_id)
+
+            try:
+                details = await get_match_details_v4(region, match_id)
+                compact = _compact_player_match_stats(
+                    details,
+                    region=region,
+                    puuid=puuid,
+                    name=name,
+                    tag=tag,
+                )
+                if compact:
+                    rows.append(compact)
+                else:
+                    errors.append({"reason": "player_not_found", "match_id": match_id})
+            except Exception as exc:
+                errors.append({"reason": "detail_error", "match_id": match_id, "error": str(exc)})
+
+            if len(rows) >= max_details:
+                break
+
+        if reached_old_match or len(rows) >= max_details:
+            break
+
+    return rows, errors
 
 
 DEFAULT_ALLOWED_HOSTS = [
@@ -743,40 +1063,87 @@ async def get_esports_games_data(
 # ---------------------------------------------------------------------------
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-async def get_player_summary(region: Region, name: str, tag: str, platform: Platform = "pc", match_count: int = 10) -> dict[str, Any]:
-    """Summarise a player's account, current MMR, recent match volume, K/D/A, agents and maps."""
-    account = await accounts.get_account(name, tag, False)
-    mmr_data = await mmr.get_mmr(region, name, tag, platform)
-    history = await matches.get_match_history(region, name, tag, platform, None, None, match_count)
+async def get_player_summary(
+    region: Region,
+    name: str,
+    tag: str,
+    platform: Platform = "pc",
+    match_count: int = 10,
+    days: int = 30,
+) -> dict[str, Any]:
+    """Production-safe compact player summary for agents.
 
-    totals = {"kills": 0, "deaths": 0, "assists": 0}
+    This avoids returning full match payloads and records API/detail errors in
+    the response instead of raising on the first failed match.
+    """
+    errors: list[dict[str, Any]] = []
+
+    account: dict[str, Any] | None = None
+    mmr_data: dict[str, Any] | None = None
+    try:
+        account = await accounts.get_account(name, tag, False)
+    except Exception as exc:
+        errors.append({"reason": "account_error", "error": str(exc)})
+    try:
+        mmr_data = await mmr.get_mmr(region, name, tag, platform)
+    except Exception as exc:
+        errors.append({"reason": "mmr_error", "error": str(exc)})
+
+    compact_matches, match_errors = await _collect_player_window_stats(
+        region=region,
+        name=name,
+        tag=tag,
+        platform=platform,
+        days=days,
+        mode=None,
+        page_size=min(max(match_count, 1), 10),
+        max_pages=max(1, (max(match_count, 1) + 9) // 10),
+        max_details=match_count,
+    )
+    errors.extend(match_errors)
+
+    aggregate = _aggregate_compact_player_matches(
+        compact_matches,
+        player=f"{name}#{tag}",
+        region=region,
+        platform=platform,
+        days=days,
+        mode=None,
+        errors=errors,
+        include_matches=False,
+    )
     agents: dict[str, int] = {}
     maps_played: dict[str, int] = {}
+    for row in compact_matches:
+        agent = row.get("agent")
+        map_name = row.get("map")
+        if agent and agent != "Unknown":
+            agents[agent] = agents.get(agent, 0) + 1
+        if map_name:
+            maps_played[str(map_name)] = maps_played.get(str(map_name), 0) + 1
 
-    for item in history[:match_count]:
-        match_id = item.get("match_id") or item.get("id") or item.get("metadata", {}).get("matchid")
-        if not match_id:
-            continue
-        full = await matches.get_match(region, match_id)
-        row = _find_player_in_match(full, name=name, tag=tag)
-        if not row:
-            continue
-        st = _player_stats(row)
-        for k in totals:
-            totals[k] += st[k]
-        agents[_agent_name(row)] = agents.get(_agent_name(row), 0) + 1
-        maps_played[_map_name_from_match(full)] = maps_played.get(_map_name_from_match(full), 0) + 1
-
-    deaths = max(totals["deaths"], 1)
     return {
         "account": account,
         "mmr": mmr_data,
-        "matches_checked": min(len(history), match_count),
-        "totals": totals,
-        "kd": round(totals["kills"] / deaths, 2),
-        "kda": round((totals["kills"] + totals["assists"]) / deaths, 2),
+        "matches_checked": aggregate["matches_counted"],
+        "totals": {
+            "kills": aggregate["kills"],
+            "deaths": aggregate["deaths"],
+            "assists": aggregate["assists"],
+        },
+        "kd": aggregate["kd"],
+        "kda": round((aggregate["kills"] + aggregate["assists"]) / max(aggregate["deaths"], 1), 2)
+        if aggregate["matches_counted"]
+        else None,
+        "acs": aggregate["acs"],
+        "adr": aggregate["adr"],
+        "hs_pct": aggregate["hs_pct"],
+        "win_rate": aggregate["win_rate"],
+        "weekly_matches": aggregate["weekly_matches"] if days == 7 else None,
         "agents": agents,
         "maps": maps_played,
+        "confidence": aggregate["confidence"],
+        "errors": errors,
     }
 
 
@@ -911,6 +1278,161 @@ async def analyze_match(region: Region, match_id: str, player_name: str | None =
         "top_players": top_players[:10],
         "target_player": target,
     }
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_match_player_stats_compact(
+    region: Region,
+    match_id: str,
+    puuid: str | None = None,
+    name: str | None = None,
+    tag: str | None = None,
+    include_all_players: bool = False,
+) -> dict[str, Any]:
+    """Return compact per-match player stats without the full match payload.
+
+    Includes team win boolean plus head/body/leg shot counts when the Henrik
+    payload exposes them. Pass a PUUID or name+tag for one target player, or
+    include_all_players=True for a compact scoreboard.
+    """
+    full = await get_match_details_v4(region, match_id)
+    base = _compact_match_history_item(full, region=region, target_puuid=puuid)
+
+    if include_all_players:
+        players: list[dict[str, Any]] = []
+        for row in _player_rows_from_match(full):
+            if not isinstance(row, dict):
+                continue
+            item = _compact_player_match_stats(full, region=region, puuid=row.get("puuid"))
+            if item:
+                players.append({key: value for key, value in item.items() if key not in {"team_score"}})
+        return {
+            **base,
+            "players_count": len(players),
+            "players": players,
+            "notes": ["Compact scoreboard only; full match payload intentionally omitted."],
+        }
+
+    target = _compact_player_match_stats(full, region=region, puuid=puuid, name=name, tag=tag)
+    if not target:
+        return {
+            **base,
+            "error": True,
+            "message": "Player not found. Provide puuid or name+tag, or set include_all_players=True.",
+        }
+    return {
+        **base,
+        "player_stats": target,
+        "notes": ["Compact player match stats only; full match payload intentionally omitted."],
+    }
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_player_backfill_aggregate(
+    region: Region,
+    platform: Platform = "pc",
+    days: int = 7,
+    mode: str | None = None,
+    name: str | None = None,
+    tag: str | None = None,
+    puuid: str | None = None,
+    page_size: int = 5,
+    max_pages: int = 4,
+    max_details: int = 20,
+    include_matches: bool = False,
+) -> dict[str, Any]:
+    """Return compact Notion backfill aggregates for one player and date window.
+
+    Output includes ACS, ADR, K/D, HS%, win rate, and weekly match count where
+    source data is available. Missing metrics are returned as null rather than
+    guessed.
+    """
+    player_label = f"{name}#{tag}" if name and tag else puuid or "unknown"
+    compact_matches, errors = await _collect_player_window_stats(
+        region=region,
+        platform=platform,
+        days=days,
+        mode=mode,
+        page_size=page_size,
+        max_pages=max_pages,
+        max_details=max_details,
+        name=name,
+        tag=tag,
+        puuid=puuid,
+    )
+    return _aggregate_compact_player_matches(
+        compact_matches,
+        player=player_label,
+        region=region,
+        platform=platform,
+        days=days,
+        mode=mode,
+        errors=errors,
+        include_matches=include_matches,
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+async def get_bulk_player_backfill_aggregates(
+    players: list[dict[str, Any]],
+    default_region: Region = "eu",
+    default_platform: Platform = "pc",
+    days: int = 7,
+    mode: str | None = None,
+    page_size: int = 5,
+    max_pages: int = 4,
+    max_details_per_player: int = 20,
+) -> dict[str, Any]:
+    """Return bulk-safe compact Notion backfill aggregates for multiple players."""
+    max_players = 25
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for index, player in enumerate(players[:max_players]):
+        if not isinstance(player, dict):
+            errors.append({"index": index, "reason": "invalid_player"})
+            continue
+
+        name = player.get("name")
+        tag = player.get("tag")
+        puuid = player.get("puuid")
+        if not puuid and not (name and tag):
+            errors.append({"index": index, "reason": "missing_identifier", "input": player})
+            continue
+
+        try:
+            results.append(
+                await get_player_backfill_aggregate(
+                    region=player.get("region", default_region),
+                    platform=player.get("platform", default_platform),
+                    days=days,
+                    mode=mode,
+                    name=name,
+                    tag=tag,
+                    puuid=puuid,
+                    page_size=page_size,
+                    max_pages=max_pages,
+                    max_details=max_details_per_player,
+                    include_matches=False,
+                )
+            )
+        except Exception as exc:
+            errors.append({"index": index, "input": player, "reason": "aggregate_error", "error": str(exc)})
+
+    return {
+        "players_requested": len(players),
+        "players_processed": len(results),
+        "players_limit": max_players,
+        "window": {"days": days},
+        "mode_filter": mode,
+        "results": results,
+        "errors": errors,
+        "notes": [
+            "Bulk-safe response for Notion backfill.",
+            "Null metrics mean the source payload did not expose enough data; values are not invented.",
+        ],
+    }
+
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 async def audit_match_rounds(
