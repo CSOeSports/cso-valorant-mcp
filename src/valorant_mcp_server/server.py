@@ -65,7 +65,7 @@ from valorant_mcp_server.round_tools import (
     rounds_summary as _rounds_summary,
     team_economy_summary as _team_economy_summary,
 )
-from valorant_mcp_server.tools import accounts, leaderboard, matches, mmr, esports
+from valorant_mcp_server.tools import accounts, analytics, leaderboard, matches, mmr, esports
 
 def _csv_env(name: str, defaults: list[str]) -> list[str]:
     value = os.getenv(name)
@@ -565,6 +565,7 @@ mcp = FastMCP(
         allowed_origins=_csv_env("MCP_ALLOWED_ORIGINS", DEFAULT_ALLOWED_ORIGINS),
     ),
 )
+analytics.register_analytics_tools(mcp)
 
 # ---------------------------------------------------------------------------
 # Account tools
