@@ -214,6 +214,38 @@ If you prefer to build the container yourself instead of using the pre-built ima
 
 ---
 
+## CSO Dashboard Live Stats Endpoint
+
+When the server runs with the HTTP transport, it also exposes a protected JSON
+endpoint for the CSO Valorant Team Stats dashboard:
+
+```text
+GET /stats/dashboard
+Authorization: Bearer <VALORANT_DASHBOARD_API_TOKEN>
+```
+
+Set these environment variables on the Valorant MCP server:
+
+```bash
+HENRIK_API_KEY=your_henrik_key
+VALORANT_DASHBOARD_API_TOKEN=generate_a_long_random_token
+VALORANT_DASHBOARD_CACHE_SECONDS=60
+VALORANT_DASHBOARD_WINDOW_DAYS=30
+```
+
+Then set the Sites dashboard environment to:
+
+```bash
+VALORANT_STATS_API_URL=https://valorant.csoesports.com/stats/dashboard
+VALORANT_STATS_API_TOKEN=<same token as VALORANT_DASHBOARD_API_TOKEN>
+```
+
+The dashboard will keep using its cached fallback until this endpoint returns
+valid JSON. Once it does, the refresh card switches from `cache only` to
+`live feed`.
+
+---
+
 ## 🙏 Credits
 
 This project is made possible thanks to the **Henrik API** providing the unofficial Valorant API data endpoints.

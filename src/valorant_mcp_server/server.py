@@ -14,12 +14,17 @@ Usage:
 """
 
 import json
+import hmac
 import os
+import time
+from datetime import datetime, timezone
 from typing import Any
 from mcp.types import ToolAnnotations
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 from valorant_mcp_server.literals import (
     GameMode,
@@ -566,6 +571,283 @@ mcp = FastMCP(
     ),
 )
 analytics.register_analytics_tools(mcp)
+
+DEFAULT_DASHBOARD_ROSTER: list[dict[str, Any]] = [
+    {
+        "id": "bianca-cronje",
+        "rosterName": "Bianca Cronje",
+        "riotId": "CSO BumbleB#BUZZ",
+        "name": "CSO BumbleB",
+        "tag": "BUZZ",
+        "team": "CSO AllSorts",
+        "country": "South Africa",
+        "peakRank": "Silver 1",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20DagDroom%23007/overview?platform=pc&playlist=competitive&season=ac12e9b3-47e6-9599-8fa1-0bb473e5efc7",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "jackie-koegelenberg",
+        "rosterName": "Jackie Koegelenberg",
+        "riotId": "CSO BloodRayne#CSO",
+        "name": "CSO BloodRayne",
+        "tag": "CSO",
+        "team": "CSO AllSorts",
+        "country": "South Africa",
+        "peakRank": "Silver 2",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20BloodRayne%23CSO/overview?platform=pc&playlist=competitive&season=3ea2b318-423b-cf86-25da-7cbb0eefbe2d",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "jordan-torran",
+        "rosterName": "Jordan Torran",
+        "riotId": "CSO Caelus#donut",
+        "name": "CSO Caelus",
+        "tag": "donut",
+        "team": "CSO AllSorts",
+        "country": "South Africa",
+        "peakRank": "Gold 2",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20Caelus%23donut/overview?platform=pc&playlist=competitive&season=4c4b8cff-43eb-13d3-8f14-96b783c90cd2",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "matthew-langton",
+        "rosterName": "Matthew Langton",
+        "riotId": "CSO Krytos#CSO",
+        "name": "CSO Krytos",
+        "tag": "CSO",
+        "team": "CSO AllSorts",
+        "country": "South Africa",
+        "peakRank": "Bronze 1",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20Krytos%23CSO/overview?platform=pc&playlist=competitive&season=3ea2b318-423b-cf86-25da-7cbb0eefbe2d",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "ryan-botha",
+        "rosterName": "Ryan Botha",
+        "riotId": "CSO GH0ST3x#404",
+        "name": "CSO GH0ST3x",
+        "tag": "404",
+        "team": "CSO AllSorts",
+        "country": "South Africa",
+        "peakRank": "Silver 1",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20GH0ST3x%23404/overview?platform=pc&playlist=competitive",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "tony-mpofu",
+        "rosterName": "Tony Mpofu",
+        "riotId": "CSO Notox#2002",
+        "name": "CSO Notox",
+        "tag": "2002",
+        "team": "CSO AllSorts",
+        "country": "South Africa",
+        "peakRank": "Gold 3",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20Notox%232002/overview?platform=pc&playlist=competitive&season=4c4b8cff-43eb-13d3-8f14-96b783c90cd2",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "william-mampuru",
+        "rosterName": "William Mampuru",
+        "riotId": "CSO BrimReaper#MOLLY",
+        "name": "CSO BrimReaper",
+        "tag": "MOLLY",
+        "team": "CSO AllSorts",
+        "country": "South Africa",
+        "peakRank": "Platinum 2",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20BrimReaper%23MOLLY/overview?platform=pc&playlist=competitive",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "andrew-browski",
+        "rosterName": "Andrew Browski",
+        "riotId": "CSO Geto#CULT",
+        "name": "CSO Geto",
+        "tag": "CULT",
+        "team": "CSO Pathward",
+        "country": "South Africa",
+        "peakRank": "Gold 3",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20Geto%23CULT/overview?platform=pc&playlist=competitive",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "asher-james-anderson",
+        "rosterName": "Asher James Anderson",
+        "riotId": "CSO Arcatron#123",
+        "name": "CSO Arcatron",
+        "tag": "123",
+        "team": "CSO Pathward",
+        "country": "South Africa",
+        "peakRank": "Plat 1",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20Arcatron%23123/overview?platform=pc&playlist=competitive",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "duncan-whitehorn",
+        "rosterName": "Duncan Whitehorn",
+        "riotId": "CSO Freaker#999",
+        "name": "CSO Freaker",
+        "tag": "999",
+        "team": "CSO Pathward",
+        "country": "South Africa",
+        "peakRank": "Gold 2",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20Freaker%23999/overview?platform=pc&playlist=competitive",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "corey-bowden",
+        "rosterName": "Corey Bowden",
+        "riotId": "CSO EGO#ruzie",
+        "name": "CSO EGO",
+        "tag": "ruzie",
+        "team": "CSO Riftguard",
+        "country": "South Africa",
+        "peakRank": "Diamond 1",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20EGO%23ruzie/overview?platform=pc&playlist=competitive",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "jayden-peta",
+        "rosterName": "Jayden Peta",
+        "riotId": "CSO Veilsettsu#KII",
+        "name": "CSO Veilsettsu",
+        "tag": "KII",
+        "team": "CSO Riftguard",
+        "country": "South Africa",
+        "peakRank": "Diamond 1",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20Veilsettsu%23KII/overview?platform=pc&playlist=competitive",
+        "region": "eu",
+        "platform": "pc",
+    },
+    {
+        "id": "tshepo-mohlomi",
+        "rosterName": "Tshepo Mohlomi",
+        "riotId": "CSO Arctic#Ice",
+        "name": "CSO Arctic",
+        "tag": "Ice",
+        "team": "CSO Riftguard",
+        "country": "South Africa",
+        "peakRank": "Ascendant 1",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20Arctic%23Ice/overview?platform=pc&playlist=competitive&season=4c4b8cff-43eb-13d3-8f14-96b783c90cd2",
+        "region": "eu",
+        "platform": "pc",
+    },
+]
+
+_DASHBOARD_CACHE: dict[str, Any] | None = None
+_DASHBOARD_CACHE_KEY: str | None = None
+_DASHBOARD_CACHE_EXPIRES_AT = 0.0
+
+
+def _dashboard_api_token() -> str | None:
+    return os.getenv("VALORANT_DASHBOARD_API_TOKEN") or os.getenv("VALORANT_STATS_API_TOKEN")
+
+
+def _dashboard_auth_response(request: Request) -> JSONResponse | None:
+    expected = _dashboard_api_token()
+    if not expected:
+        return JSONResponse(
+            {
+                "error": "dashboard_stats_token_not_configured",
+                "message": "Set VALORANT_DASHBOARD_API_TOKEN before exposing /stats/dashboard.",
+            },
+            status_code=503,
+        )
+
+    auth_header = request.headers.get("authorization", "")
+    scheme, _, supplied = auth_header.partition(" ")
+    if scheme.lower() != "bearer" or not supplied:
+        return JSONResponse({"error": "missing_bearer_token"}, status_code=401)
+
+    if not hmac.compare_digest(supplied.strip(), expected):
+        return JSONResponse({"error": "invalid_bearer_token"}, status_code=403)
+
+    return None
+
+
+def _dashboard_int(value: Any, default: int, *, min_value: int, max_value: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(min_value, min(parsed, max_value))
+
+
+def _dashboard_roster() -> list[dict[str, Any]]:
+    raw = os.getenv("CSO_VALORANT_DASHBOARD_PLAYERS_JSON")
+    source = DEFAULT_DASHBOARD_ROSTER
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                source = [item for item in parsed if isinstance(item, dict)]
+        except Exception:
+            source = DEFAULT_DASHBOARD_ROSTER
+
+    roster: list[dict[str, Any]] = []
+    for item in source:
+        player = dict(item)
+        riot_id = str(player.get("riotId") or player.get("riot_id") or "")
+        name = player.get("name")
+        tag = player.get("tag")
+        if riot_id and (not name or not tag) and "#" in riot_id:
+            name, tag = riot_id.split("#", 1)
+            player["name"] = name
+            player["tag"] = tag
+        if not riot_id and name and tag:
+            riot_id = f"{name}#{tag}"
+            player["riotId"] = riot_id
+        if player.get("name") and player.get("tag"):
+            roster.append(player)
+    return roster
+
+
+def _dashboard_player_stats(player: dict[str, Any], aggregate: dict[str, Any] | None) -> dict[str, Any]:
+    region = str(player.get("region") or "eu")
+    platform = str(player.get("platform") or "pc")
+    riot_id = str(player.get("riotId") or f"{player.get('name')}#{player.get('tag')}")
+    errors = aggregate.get("errors") if isinstance(aggregate, dict) else [{"reason": "missing_aggregate"}]
+    if not isinstance(errors, list):
+        errors = []
+
+    return {
+        "player": riot_id,
+        "region": aggregate.get("region", region) if aggregate else region,
+        "platform": aggregate.get("platform", platform) if aggregate else platform,
+        "weeklyMatches": aggregate.get("weekly_matches", 0) if aggregate else 0,
+        "matchesCounted": aggregate.get("matches_counted", 0) if aggregate else 0,
+        "wins": aggregate.get("wins", 0) if aggregate else 0,
+        "losses": aggregate.get("losses", 0) if aggregate else 0,
+        "winRate": aggregate.get("win_rate") if aggregate else None,
+        "kills": aggregate.get("kills", 0) if aggregate else 0,
+        "deaths": aggregate.get("deaths", 0) if aggregate else 0,
+        "assists": aggregate.get("assists", 0) if aggregate else 0,
+        "kd": aggregate.get("kd") if aggregate else None,
+        "acs": aggregate.get("acs") if aggregate else None,
+        "adr": aggregate.get("adr") if aggregate else None,
+        "headshots": aggregate.get("headshots") if aggregate else None,
+        "bodyshots": aggregate.get("bodyshots") if aggregate else None,
+        "legshots": aggregate.get("legshots") if aggregate else None,
+        "hsPct": aggregate.get("hs_pct") if aggregate else None,
+        "confidence": aggregate.get("confidence", "low") if aggregate else "low",
+        "errorCount": len(errors),
+    }
+
+
+def _dashboard_cache_seconds(request: Request) -> int:
+    configured = os.getenv("VALORANT_DASHBOARD_CACHE_SECONDS", "60")
+    requested = request.query_params.get("cacheSeconds", configured)
+    return _dashboard_int(requested, 60, min_value=0, max_value=3600)
 
 # ---------------------------------------------------------------------------
 # Account tools
@@ -1433,6 +1715,151 @@ async def get_bulk_player_backfill_aggregates(
             "Null metrics mean the source payload did not expose enough data; values are not invented.",
         ],
     }
+
+
+@mcp.custom_route("/stats/dashboard", methods=["GET"], include_in_schema=False)
+async def get_cso_dashboard_snapshot(request: Request) -> Response:
+    """Return the CSO Valorant dashboard snapshot as plain JSON.
+
+    This endpoint is intentionally separate from MCP so the public Sites app can
+    poll it with a normal server-side fetch. It requires a bearer token because
+    FastMCP custom routes do not inherit MCP transport auth.
+    """
+    global _DASHBOARD_CACHE, _DASHBOARD_CACHE_EXPIRES_AT, _DASHBOARD_CACHE_KEY
+
+    auth_response = _dashboard_auth_response(request)
+    if auth_response is not None:
+        return auth_response
+
+    roster = _dashboard_roster()
+    days = _dashboard_int(
+        request.query_params.get("days", os.getenv("VALORANT_DASHBOARD_WINDOW_DAYS", "30")),
+        30,
+        min_value=1,
+        max_value=90,
+    )
+    page_size = _dashboard_int(request.query_params.get("pageSize"), 5, min_value=1, max_value=10)
+    max_pages = _dashboard_int(request.query_params.get("maxPages"), 4, min_value=1, max_value=10)
+    max_details = _dashboard_int(
+        request.query_params.get("maxDetailsPerPlayer"),
+        20,
+        min_value=1,
+        max_value=50,
+    )
+    mode = request.query_params.get("mode") or os.getenv("VALORANT_DASHBOARD_MODE", "competitive")
+    cache_seconds = _dashboard_cache_seconds(request)
+    force = request.query_params.get("force", "").lower() in {"1", "true", "yes"}
+    cache_key = json.dumps(
+        {
+            "players": [
+                [player.get("name"), player.get("tag"), player.get("region", "eu"), player.get("platform", "pc")]
+                for player in roster
+            ],
+            "days": days,
+            "page_size": page_size,
+            "max_pages": max_pages,
+            "max_details": max_details,
+            "mode": mode,
+        },
+        sort_keys=True,
+    )
+
+    now_ts = time.time()
+    if (
+        not force
+        and cache_seconds > 0
+        and _DASHBOARD_CACHE is not None
+        and _DASHBOARD_CACHE_KEY == cache_key
+        and now_ts < _DASHBOARD_CACHE_EXPIRES_AT
+    ):
+        return JSONResponse(
+            {
+                **_DASHBOARD_CACHE,
+                "servedAt": datetime.now(timezone.utc).isoformat(),
+                "cache": {
+                    "status": "hit",
+                    "ttlSeconds": max(0, int(_DASHBOARD_CACHE_EXPIRES_AT - now_ts)),
+                },
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    try:
+        aggregate = await get_bulk_player_backfill_aggregates(
+            players=[
+                {
+                    "name": player.get("name"),
+                    "tag": player.get("tag"),
+                    "region": player.get("region", "eu"),
+                    "platform": player.get("platform", "pc"),
+                }
+                for player in roster
+            ],
+            default_region="eu",
+            default_platform="pc",
+            days=days,
+            mode=mode,
+            page_size=page_size,
+            max_pages=max_pages,
+            max_details_per_player=max_details,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {"error": "dashboard_snapshot_failed", "message": str(exc)},
+            status_code=502,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    aggregates_by_player = {
+        str(item.get("player", "")).lower(): item
+        for item in aggregate.get("results", [])
+        if isinstance(item, dict)
+    }
+    generated_at = datetime.now(timezone.utc).isoformat()
+    snapshot = {
+        "generatedAt": generated_at,
+        "servedAt": generated_at,
+        "windowDays": days,
+        "mode": "competitive",
+        "refreshMode": "external",
+        "externalRefreshConfigured": True,
+        "dataSources": {
+            "roster": "CSO Valorant dashboard roster",
+            "stats": "Valorant MCP live aggregate endpoint",
+        },
+        "notes": [
+            "Live stats generated by the CSO Valorant MCP server /stats/dashboard endpoint.",
+            f"Server-side cache window is {cache_seconds}s to protect HenrikDev rate limits.",
+            "Null metrics mean the source payload did not expose enough data; values are not invented.",
+        ],
+        "players": [
+            {
+                "id": player.get("id") or str(player.get("riotId", "")).lower().replace(" ", "-").replace("#", "-"),
+                "rosterName": player.get("rosterName") or player.get("roster_name") or player.get("name"),
+                "riotId": player.get("riotId") or f"{player.get('name')}#{player.get('tag')}",
+                "team": player.get("team") or "CSO Valorant",
+                "status": "Active",
+                "country": player.get("country") or "South Africa",
+                "peakRank": player.get("peakRank") or player.get("peak_rank") or "Unranked",
+                "trackerUrl": player.get("trackerUrl") or player.get("tracker_url"),
+                "stats": _dashboard_player_stats(
+                    player,
+                    aggregates_by_player.get(
+                        str(player.get("riotId") or f"{player.get('name')}#{player.get('tag')}").lower()
+                    ),
+                ),
+            }
+            for player in roster
+        ],
+        "errors": aggregate.get("errors", []),
+        "cache": {"status": "miss", "ttlSeconds": cache_seconds},
+    }
+
+    _DASHBOARD_CACHE = snapshot
+    _DASHBOARD_CACHE_KEY = cache_key
+    _DASHBOARD_CACHE_EXPIRES_AT = now_ts + cache_seconds
+
+    return JSONResponse(snapshot, headers={"Cache-Control": "no-store"})
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
