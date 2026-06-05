@@ -899,7 +899,6 @@ def _dashboard_player_cache_key(
 ) -> str:
     return json.dumps(
         {
-            "schema": 1,
             "player": _dashboard_player_label(player).lower(),
             "region": str(player.get("region") or "eu").lower(),
             "platform": str(player.get("platform") or "pc").lower(),
