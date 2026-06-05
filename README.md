@@ -234,7 +234,7 @@ VALORANT_DASHBOARD_WINDOW_DAYS=30
 VALORANT_DASHBOARD_MODE=competitive
 VALORANT_DASHBOARD_REFRESH_PLAYERS_PER_REQUEST=4
 VALORANT_DASHBOARD_PLAYER_CACHE_TTL_SECONDS=86400
-VALORANT_DASHBOARD_PLAYER_CACHE_FILE=/tmp/cso-valorant-dashboard-player-cache.json
+VALORANT_DASHBOARD_PLAYER_CACHE_FILE=/data/cso-valorant-dashboard-player-cache.json
 ```
 
 The dashboard endpoint uses a rolling per-player cache to avoid Henrik API rate
@@ -247,6 +247,8 @@ the cache in memory only.
 `VALORANT_DASHBOARD_MODE=competitive` keeps the dashboard strict to competitive
 matches. Use `VALORANT_DASHBOARD_MODE=all`, or pass `mode=all`, when the
 dashboard should use all recent Valorant matches for better roster coverage.
+For Docker deployments, mount a host directory to `/data` so the last-good
+player cache survives container recreation.
 
 Then set the Sites dashboard environment to:
 
