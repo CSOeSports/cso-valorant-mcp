@@ -16,8 +16,10 @@ Usage:
 import json
 import hmac
 import os
+import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from mcp.types import ToolAnnotations
 
@@ -747,6 +749,9 @@ DEFAULT_DASHBOARD_ROSTER: list[dict[str, Any]] = [
 _DASHBOARD_CACHE: dict[str, Any] | None = None
 _DASHBOARD_CACHE_KEY: str | None = None
 _DASHBOARD_CACHE_EXPIRES_AT = 0.0
+_DASHBOARD_PLAYER_CACHE: dict[str, dict[str, Any]] = {}
+_DASHBOARD_PLAYER_CACHE_LOADED = False
+_DASHBOARD_ROLLING_CURSOR_BY_KEY: dict[str, int] = {}
 
 
 def _dashboard_api_token() -> str | None:
@@ -781,6 +786,196 @@ def _dashboard_int(value: Any, default: int, *, min_value: int, max_value: int) 
     except Exception:
         parsed = default
     return max(min_value, min(parsed, max_value))
+
+
+def _dashboard_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dashboard_player_label(player: dict[str, Any]) -> str:
+    return str(player.get("riotId") or f"{player.get('name')}#{player.get('tag')}")
+
+
+def _dashboard_player_cache_file() -> Path | None:
+    configured = os.getenv("VALORANT_DASHBOARD_PLAYER_CACHE_FILE")
+    if configured and configured.strip().lower() in {"0", "false", "off", "none"}:
+        return None
+
+    path = configured or os.path.join(
+        tempfile.gettempdir(),
+        "cso-valorant-dashboard-player-cache.json",
+    )
+    return Path(path)
+
+
+def _dashboard_load_player_cache() -> None:
+    global _DASHBOARD_PLAYER_CACHE, _DASHBOARD_PLAYER_CACHE_LOADED
+
+    if _DASHBOARD_PLAYER_CACHE_LOADED:
+        return
+
+    _DASHBOARD_PLAYER_CACHE_LOADED = True
+    cache_file = _dashboard_player_cache_file()
+    if cache_file is None or not cache_file.exists():
+        return
+
+    try:
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    players = payload.get("players") if isinstance(payload, dict) else None
+    if isinstance(players, dict):
+        _DASHBOARD_PLAYER_CACHE = {
+            str(key): value
+            for key, value in players.items()
+            if isinstance(value, dict)
+        }
+
+
+def _dashboard_save_player_cache() -> None:
+    cache_file = _dashboard_player_cache_file()
+    if cache_file is None:
+        return
+
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_file = cache_file.with_suffix(f"{cache_file.suffix}.tmp")
+        tmp_file.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "savedAt": datetime.now(timezone.utc).isoformat(),
+                    "players": _DASHBOARD_PLAYER_CACHE,
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        tmp_file.replace(cache_file)
+    except Exception:
+        return
+
+
+def _dashboard_player_cache_key(
+    player: dict[str, Any],
+    *,
+    days: int,
+    mode: str | None,
+    page_size: int,
+    max_pages: int,
+    max_details: int,
+) -> str:
+    return json.dumps(
+        {
+            "player": _dashboard_player_label(player).lower(),
+            "region": str(player.get("region") or "eu").lower(),
+            "platform": str(player.get("platform") or "pc").lower(),
+            "days": days,
+            "mode": mode or "",
+            "page_size": page_size,
+            "max_pages": max_pages,
+            "max_details": max_details,
+        },
+        sort_keys=True,
+    )
+
+
+def _dashboard_player_cache_ttl_seconds(request: Request) -> int:
+    configured = os.getenv("VALORANT_DASHBOARD_PLAYER_CACHE_TTL_SECONDS", "86400")
+    requested = request.query_params.get("playerCacheTtlSeconds", configured)
+    return _dashboard_int(requested, 86400, min_value=0, max_value=604800)
+
+
+def _dashboard_refresh_players_per_request(request: Request, roster_size: int) -> int:
+    configured = os.getenv("VALORANT_DASHBOARD_REFRESH_PLAYERS_PER_REQUEST", "4")
+    requested = request.query_params.get("refreshPlayers", configured)
+    return _dashboard_int(requested, 4, min_value=1, max_value=max(1, roster_size))
+
+
+def _dashboard_is_good_aggregate(aggregate: dict[str, Any] | None) -> bool:
+    if not isinstance(aggregate, dict):
+        return False
+
+    return int(aggregate.get("matches_counted") or 0) > 0
+
+
+def _dashboard_cached_aggregate(
+    cache_key: str,
+    *,
+    now_ts: float,
+    ttl_seconds: int,
+) -> dict[str, Any] | None:
+    _dashboard_load_player_cache()
+    entry = _DASHBOARD_PLAYER_CACHE.get(cache_key)
+    if not isinstance(entry, dict):
+        return None
+
+    aggregate = entry.get("aggregate")
+    if not isinstance(aggregate, dict):
+        return None
+
+    updated_ts = float(entry.get("updatedTs") or 0)
+    if ttl_seconds > 0 and updated_ts > 0 and now_ts - updated_ts > ttl_seconds:
+        return None
+
+    cached = dict(aggregate)
+    cached["dashboard_cache"] = {
+        "status": "last_good",
+        "updatedAt": entry.get("updatedAt"),
+    }
+    return cached
+
+
+def _dashboard_update_player_cache(
+    cache_key: str,
+    player: dict[str, Any],
+    aggregate: dict[str, Any],
+    *,
+    now_ts: float,
+) -> None:
+    if not _dashboard_is_good_aggregate(aggregate):
+        return
+
+    _dashboard_load_player_cache()
+    updated_at = datetime.fromtimestamp(now_ts, timezone.utc).isoformat()
+    _DASHBOARD_PLAYER_CACHE[cache_key] = {
+        "updatedAt": updated_at,
+        "updatedTs": now_ts,
+        "player": _dashboard_player_label(player),
+        "aggregate": aggregate,
+    }
+
+
+def _dashboard_select_refresh_players(
+    roster: list[dict[str, Any]],
+    cache_keys: list[str],
+    *,
+    now_ts: float,
+    ttl_seconds: int,
+    refresh_count: int,
+    rolling_key: str,
+) -> list[tuple[int, dict[str, Any]]]:
+    if not roster:
+        return []
+
+    start = _DASHBOARD_ROLLING_CURSOR_BY_KEY.get(rolling_key, 0) % len(roster)
+    ordered_indices = [(start + offset) % len(roster) for offset in range(len(roster))]
+    missing_or_stale = [
+        index
+        for index in ordered_indices
+        if _dashboard_cached_aggregate(cache_keys[index], now_ts=now_ts, ttl_seconds=ttl_seconds) is None
+    ]
+    missing_or_stale_set = set(missing_or_stale)
+    cached = [index for index in ordered_indices if index not in missing_or_stale_set]
+    selected_indices = (missing_or_stale + cached)[:refresh_count]
+
+    if selected_indices:
+        _DASHBOARD_ROLLING_CURSOR_BY_KEY[rolling_key] = (selected_indices[-1] + 1) % len(roster)
+
+    return [(index, roster[index]) for index in selected_indices]
 
 
 def _dashboard_roster() -> list[dict[str, Any]]:
@@ -1748,7 +1943,10 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
     )
     mode = request.query_params.get("mode") or os.getenv("VALORANT_DASHBOARD_MODE", "competitive")
     cache_seconds = _dashboard_cache_seconds(request)
+    player_cache_ttl_seconds = _dashboard_player_cache_ttl_seconds(request)
+    refresh_players = _dashboard_refresh_players_per_request(request, len(roster))
     force = request.query_params.get("force", "").lower() in {"1", "true", "yes"}
+    bypass_player_cache = _dashboard_bool(request.query_params.get("bypassPlayerCache"), False)
     cache_key = json.dumps(
         {
             "players": [
@@ -1760,6 +1958,8 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
             "max_pages": max_pages,
             "max_details": max_details,
             "mode": mode,
+            "refresh_players": refresh_players,
+            "player_cache_ttl_seconds": player_cache_ttl_seconds,
         },
         sort_keys=True,
     )
@@ -1784,37 +1984,107 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
             headers={"Cache-Control": "no-store"},
         )
 
-    try:
-        aggregate = await get_bulk_player_backfill_aggregates(
-            players=[
-                {
-                    "name": player.get("name"),
-                    "tag": player.get("tag"),
-                    "region": player.get("region", "eu"),
-                    "platform": player.get("platform", "pc"),
-                }
-                for player in roster
-            ],
-            default_region="eu",
-            default_platform="pc",
+    player_cache_keys = [
+        _dashboard_player_cache_key(
+            player,
             days=days,
             mode=mode,
             page_size=page_size,
             max_pages=max_pages,
-            max_details_per_player=max_details,
+            max_details=max_details,
         )
-    except Exception as exc:
-        return JSONResponse(
-            {"error": "dashboard_snapshot_failed", "message": str(exc)},
-            status_code=502,
-            headers={"Cache-Control": "no-store"},
+        for player in roster
+    ]
+    selected_players = _dashboard_select_refresh_players(
+        roster,
+        player_cache_keys,
+        now_ts=now_ts,
+        ttl_seconds=player_cache_ttl_seconds,
+        refresh_count=refresh_players,
+        rolling_key=cache_key,
+    )
+    selected_indices = {index for index, _ in selected_players}
+    refresh_errors: list[dict[str, Any]] = []
+    refresh_results: dict[str, dict[str, Any]] = {}
+
+    if selected_players:
+        try:
+            aggregate = await get_bulk_player_backfill_aggregates(
+                players=[
+                    {
+                        "name": player.get("name"),
+                        "tag": player.get("tag"),
+                        "region": player.get("region", "eu"),
+                        "platform": player.get("platform", "pc"),
+                    }
+                    for _, player in selected_players
+                ],
+                default_region="eu",
+                default_platform="pc",
+                days=days,
+                mode=mode,
+                page_size=page_size,
+                max_pages=max_pages,
+                max_details_per_player=max_details,
+            )
+        except Exception as exc:
+            aggregate = {"results": [], "errors": [{"reason": "refresh_failed", "error": str(exc)}]}
+
+        refresh_errors = [
+            item for item in aggregate.get("errors", []) if isinstance(item, dict)
+        ]
+        refresh_results = {
+            str(item.get("player", "")).lower(): item
+            for item in aggregate.get("results", [])
+            if isinstance(item, dict)
+        }
+
+    aggregates_by_player: dict[str, dict[str, Any]] = {}
+    refreshed_count = 0
+    last_good_count = 0
+    limited_uncached_count = 0
+    player_cache_updated = False
+
+    for index, player in enumerate(roster):
+        label = _dashboard_player_label(player).lower()
+        cache_key_for_player = player_cache_keys[index]
+        refreshed = refresh_results.get(label)
+        cached = None if bypass_player_cache else _dashboard_cached_aggregate(
+            cache_key_for_player,
+            now_ts=now_ts,
+            ttl_seconds=player_cache_ttl_seconds,
         )
 
-    aggregates_by_player = {
-        str(item.get("player", "")).lower(): item
-        for item in aggregate.get("results", [])
-        if isinstance(item, dict)
-    }
+        if refreshed and _dashboard_is_good_aggregate(refreshed):
+            aggregates_by_player[label] = refreshed
+            refreshed_count += 1
+            _dashboard_update_player_cache(cache_key_for_player, player, refreshed, now_ts=now_ts)
+            player_cache_updated = True
+            continue
+
+        if cached:
+            aggregates_by_player[label] = cached
+            last_good_count += 1
+            continue
+
+        if refreshed:
+            aggregates_by_player[label] = refreshed
+            if index in selected_indices:
+                limited_uncached_count += 1
+            continue
+
+        if index in selected_indices:
+            refresh_errors.append(
+                {
+                    "player": _dashboard_player_label(player),
+                    "reason": "missing_refresh_result",
+                }
+            )
+        limited_uncached_count += 1
+
+    if player_cache_updated:
+        _dashboard_save_player_cache()
+
     generated_at = datetime.now(timezone.utc).isoformat()
     snapshot = {
         "generatedAt": generated_at,
@@ -1830,6 +2100,7 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
         "notes": [
             "Live stats generated by the CSO Valorant MCP server /stats/dashboard endpoint.",
             f"Server-side cache window is {cache_seconds}s to protect HenrikDev rate limits.",
+            f"Rolling player cache refreshed {len(selected_players)} players and served {last_good_count} from last-good cache.",
             "Null metrics mean the source payload did not expose enough data; values are not invented.",
         ],
         "players": [
@@ -1844,15 +2115,24 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
                 "trackerUrl": player.get("trackerUrl") or player.get("tracker_url"),
                 "stats": _dashboard_player_stats(
                     player,
-                    aggregates_by_player.get(
-                        str(player.get("riotId") or f"{player.get('name')}#{player.get('tag')}").lower()
-                    ),
+                    aggregates_by_player.get(_dashboard_player_label(player).lower()),
                 ),
             }
             for player in roster
         ],
-        "errors": aggregate.get("errors", []),
+        "errors": refresh_errors,
         "cache": {"status": "miss", "ttlSeconds": cache_seconds},
+        "rollingCache": {
+            "refreshPlayersPerRequest": refresh_players,
+            "playersSelectedForRefresh": [
+                _dashboard_player_label(player) for _, player in selected_players
+            ],
+            "playersRefreshedWithUsableStats": refreshed_count,
+            "playersServedFromLastGoodCache": last_good_count,
+            "playersWithoutUsableStats": limited_uncached_count,
+            "playerCacheTtlSeconds": player_cache_ttl_seconds,
+            "playerCacheFileEnabled": _dashboard_player_cache_file() is not None,
+        },
     }
 
     _DASHBOARD_CACHE = snapshot

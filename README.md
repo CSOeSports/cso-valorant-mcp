@@ -231,7 +231,17 @@ HENRIK_API_KEY=your_henrik_key
 VALORANT_DASHBOARD_API_TOKEN=generate_a_long_random_token
 VALORANT_DASHBOARD_CACHE_SECONDS=60
 VALORANT_DASHBOARD_WINDOW_DAYS=30
+VALORANT_DASHBOARD_REFRESH_PLAYERS_PER_REQUEST=4
+VALORANT_DASHBOARD_PLAYER_CACHE_TTL_SECONDS=86400
+VALORANT_DASHBOARD_PLAYER_CACHE_FILE=/tmp/cso-valorant-dashboard-player-cache.json
 ```
+
+The dashboard endpoint uses a rolling per-player cache to avoid Henrik API rate
+limit spikes. On each cache miss it refreshes a small slice of the roster, keeps
+last-good aggregates for everyone else, and only marks a player limited when no
+usable current or cached match-detail stats are available. Set
+`VALORANT_DASHBOARD_PLAYER_CACHE_FILE=off` to disable disk persistence and keep
+the cache in memory only.
 
 Then set the Sites dashboard environment to:
 
