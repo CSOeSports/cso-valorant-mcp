@@ -794,6 +794,18 @@ def _dashboard_bool(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _dashboard_mode(value: Any, default: str | None = "competitive") -> str | None:
+    raw = value if value is not None else default
+    if raw is None:
+        return None
+
+    normalized = str(raw).strip().lower()
+    if normalized in {"", "all", "any", "none", "off", "*"}:
+        return None
+
+    return normalized
+
+
 def _dashboard_player_label(player: dict[str, Any]) -> str:
     return str(player.get("riotId") or f"{player.get('name')}#{player.get('tag')}")
 
@@ -1941,7 +1953,11 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
         min_value=1,
         max_value=50,
     )
-    mode = request.query_params.get("mode") or os.getenv("VALORANT_DASHBOARD_MODE", "competitive")
+    mode = _dashboard_mode(
+        request.query_params.get("mode"),
+        os.getenv("VALORANT_DASHBOARD_MODE", "competitive"),
+    )
+    mode_label = mode or "all"
     cache_seconds = _dashboard_cache_seconds(request)
     player_cache_ttl_seconds = _dashboard_player_cache_ttl_seconds(request)
     refresh_players = _dashboard_refresh_players_per_request(request, len(roster))
@@ -1957,7 +1973,7 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
             "page_size": page_size,
             "max_pages": max_pages,
             "max_details": max_details,
-            "mode": mode,
+            "mode": mode_label,
             "refresh_players": refresh_players,
             "player_cache_ttl_seconds": player_cache_ttl_seconds,
         },
@@ -2090,7 +2106,7 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
         "generatedAt": generated_at,
         "servedAt": generated_at,
         "windowDays": days,
-        "mode": "competitive",
+        "mode": mode_label,
         "refreshMode": "external",
         "externalRefreshConfigured": True,
         "dataSources": {

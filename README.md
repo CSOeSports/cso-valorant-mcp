@@ -231,6 +231,7 @@ HENRIK_API_KEY=your_henrik_key
 VALORANT_DASHBOARD_API_TOKEN=generate_a_long_random_token
 VALORANT_DASHBOARD_CACHE_SECONDS=60
 VALORANT_DASHBOARD_WINDOW_DAYS=30
+VALORANT_DASHBOARD_MODE=competitive
 VALORANT_DASHBOARD_REFRESH_PLAYERS_PER_REQUEST=4
 VALORANT_DASHBOARD_PLAYER_CACHE_TTL_SECONDS=86400
 VALORANT_DASHBOARD_PLAYER_CACHE_FILE=/tmp/cso-valorant-dashboard-player-cache.json
@@ -242,6 +243,10 @@ last-good aggregates for everyone else, and only marks a player limited when no
 usable current or cached match-detail stats are available. Set
 `VALORANT_DASHBOARD_PLAYER_CACHE_FILE=off` to disable disk persistence and keep
 the cache in memory only.
+
+`VALORANT_DASHBOARD_MODE=competitive` keeps the dashboard strict to competitive
+matches. Use `VALORANT_DASHBOARD_MODE=all`, or pass `mode=all`, when the
+dashboard should use all recent Valorant matches for better roster coverage.
 
 Then set the Sites dashboard environment to:
 
