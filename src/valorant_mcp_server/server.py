@@ -430,6 +430,34 @@ def _aggregate_compact_player_matches(
     bodyshots = sum(_safe_int_value(row.get("bodyshots")) for row in counted if row.get("bodyshots") is not None)
     legshots = sum(_safe_int_value(row.get("legshots")) for row in counted if row.get("legshots") is not None)
     shot_total = headshots + bodyshots + legshots
+    agent_counts: dict[str, int] = {}
+    map_counts: dict[str, int] = {}
+    daily_matches: dict[str, int] = {}
+    today_key = datetime.now(timezone.utc).date().isoformat()
+    games_today = 0
+    last_played: datetime | None = None
+
+    for row in counted:
+        agent = str(row.get("agent") or "").strip()
+        if agent and agent.lower() != "unknown":
+            agent_counts[agent] = agent_counts.get(agent, 0) + 1
+
+        map_name = str(row.get("map") or "").strip()
+        if map_name:
+            map_counts[map_name] = map_counts.get(map_name, 0) + 1
+
+        started_at = _parse_iso_datetime(row.get("started_at"))
+        if not started_at:
+            continue
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        started_at = started_at.astimezone(timezone.utc)
+        date_key = started_at.date().isoformat()
+        daily_matches[date_key] = daily_matches.get(date_key, 0) + 1
+        if date_key == today_key:
+            games_today += 1
+        if last_played is None or started_at > last_played:
+            last_played = started_at
 
     output: dict[str, Any] = {
         "player": player,
@@ -455,6 +483,12 @@ def _aggregate_compact_player_matches(
         "bodyshots": bodyshots if shot_total else None,
         "legshots": legshots if shot_total else None,
         "hs_pct": round(headshots / shot_total, 3) if shot_total else None,
+        "agent_counts": agent_counts,
+        "map_counts": map_counts,
+        "daily_matches": daily_matches,
+        "games_today": games_today,
+        "last_played_at": last_played.isoformat() if last_played else None,
+        "rr_delta": None,
         "errors": errors,
         "confidence": "high" if matches_count and not errors else "medium" if matches_count else "low",
     }
@@ -937,7 +971,16 @@ def _dashboard_has_impact_stats(aggregate: dict[str, Any] | None) -> bool:
 
     return all(
         key in aggregate
-        for key in ("kast_pct", "first_kills", "first_deaths")
+        for key in (
+            "kast_pct",
+            "first_kills",
+            "first_deaths",
+            "agent_counts",
+            "map_counts",
+            "daily_matches",
+            "games_today",
+            "last_played_at",
+        )
     )
 
 
@@ -1083,6 +1126,12 @@ def _dashboard_player_stats(player: dict[str, Any], aggregate: dict[str, Any] | 
         "bodyshots": aggregate.get("bodyshots") if aggregate else None,
         "legshots": aggregate.get("legshots") if aggregate else None,
         "hsPct": aggregate.get("hs_pct") if aggregate else None,
+        "agentCounts": aggregate.get("agent_counts", {}) if aggregate else {},
+        "mapCounts": aggregate.get("map_counts", {}) if aggregate else {},
+        "dailyMatches": aggregate.get("daily_matches", {}) if aggregate else {},
+        "gamesToday": aggregate.get("games_today", 0) if aggregate else 0,
+        "lastPlayedAt": aggregate.get("last_played_at") if aggregate else None,
+        "rrDelta": aggregate.get("rr_delta") if aggregate else None,
         "confidence": aggregate.get("confidence", "low") if aggregate else "low",
         "errorCount": len(errors),
     }
