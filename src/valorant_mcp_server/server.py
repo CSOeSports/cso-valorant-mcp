@@ -370,6 +370,12 @@ def _compact_player_match_stats(
         _shot_counts_from_round_stats(match, target_puuid),
     )
     won = _team_won_any(row, match)
+    impact = _player_impact_summary(match, region, puuid=target_puuid, name=name, tag=tag)
+    impact_player = impact.get("player") if isinstance(impact, dict) else None
+    if not isinstance(impact_player, dict):
+        impact_player = {}
+    impact_kast = impact_player.get("kast")
+    impact_rounds = rounds or 0
 
     return {
         **_compact_match_history_item(match, region=region, target_puuid=target_puuid),
@@ -386,6 +392,11 @@ def _compact_player_match_stats(
         "acs": round(score / rounds) if rounds else None,
         "damage_dealt": damage_dealt if damage_dealt else None,
         "adr": round(damage_dealt / rounds, 1) if damage_dealt and rounds else None,
+        "kast_rounds": round(float(impact_kast) * impact_rounds)
+        if isinstance(impact_kast, (int, float)) and impact_rounds
+        else None,
+        "first_kills": _safe_int_value(impact_player.get("first_kills")),
+        "first_deaths": _safe_int_value(impact_player.get("first_deaths")),
         **shots,
         "hs_pct": _headshot_rate(shots),
     }
@@ -412,6 +423,9 @@ def _aggregate_compact_player_matches(
     rounds = sum(_safe_int_value(row.get("rounds_count")) for row in counted)
     score = sum(_safe_int_value(row.get("score")) for row in counted)
     damage = sum(_safe_int_value(row.get("damage_dealt")) for row in counted)
+    kast_rounds = sum(_safe_int_value(row.get("kast_rounds")) for row in counted if row.get("kast_rounds") is not None)
+    first_kills = sum(_safe_int_value(row.get("first_kills")) for row in counted)
+    first_deaths = sum(_safe_int_value(row.get("first_deaths")) for row in counted)
     headshots = sum(_safe_int_value(row.get("headshots")) for row in counted if row.get("headshots") is not None)
     bodyshots = sum(_safe_int_value(row.get("bodyshots")) for row in counted if row.get("bodyshots") is not None)
     legshots = sum(_safe_int_value(row.get("legshots")) for row in counted if row.get("legshots") is not None)
@@ -434,6 +448,9 @@ def _aggregate_compact_player_matches(
         "kd": round(kills / max(deaths, 1), 2) if matches_count else None,
         "acs": round(score / rounds) if rounds else None,
         "adr": round(damage / rounds, 1) if damage and rounds else None,
+        "kast_pct": round(kast_rounds / rounds, 3) if kast_rounds and rounds else None,
+        "first_kills": first_kills,
+        "first_deaths": first_deaths,
         "headshots": headshots if shot_total else None,
         "bodyshots": bodyshots if shot_total else None,
         "legshots": legshots if shot_total else None,
@@ -1042,6 +1059,9 @@ def _dashboard_player_stats(player: dict[str, Any], aggregate: dict[str, Any] | 
         "kd": aggregate.get("kd") if aggregate else None,
         "acs": aggregate.get("acs") if aggregate else None,
         "adr": aggregate.get("adr") if aggregate else None,
+        "kastPct": aggregate.get("kast_pct") if aggregate else None,
+        "firstKills": aggregate.get("first_kills", 0) if aggregate else 0,
+        "firstDeaths": aggregate.get("first_deaths", 0) if aggregate else 0,
         "headshots": aggregate.get("headshots") if aggregate else None,
         "bodyshots": aggregate.get("bodyshots") if aggregate else None,
         "legshots": aggregate.get("legshots") if aggregate else None,
