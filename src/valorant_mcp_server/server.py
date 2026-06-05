@@ -899,7 +899,7 @@ def _dashboard_player_cache_key(
 ) -> str:
     return json.dumps(
         {
-            "schema": 2,
+            "schema": 1,
             "player": _dashboard_player_label(player).lower(),
             "region": str(player.get("region") or "eu").lower(),
             "platform": str(player.get("platform") or "pc").lower(),
@@ -930,6 +930,16 @@ def _dashboard_is_good_aggregate(aggregate: dict[str, Any] | None) -> bool:
         return False
 
     return int(aggregate.get("matches_counted") or 0) > 0
+
+
+def _dashboard_has_impact_stats(aggregate: dict[str, Any] | None) -> bool:
+    if not isinstance(aggregate, dict):
+        return False
+
+    return all(
+        key in aggregate
+        for key in ("kast_pct", "first_kills", "first_deaths")
+    )
 
 
 def _dashboard_cached_aggregate(
@@ -996,7 +1006,14 @@ def _dashboard_select_refresh_players(
     missing_or_stale = [
         index
         for index in ordered_indices
-        if _dashboard_cached_aggregate(cache_keys[index], now_ts=now_ts, ttl_seconds=ttl_seconds) is None
+        if (
+            cached := _dashboard_cached_aggregate(
+                cache_keys[index],
+                now_ts=now_ts,
+                ttl_seconds=ttl_seconds,
+            )
+        ) is None
+        or not _dashboard_has_impact_stats(cached)
     ]
     missing_or_stale_set = set(missing_or_stale)
     cached = [index for index in ordered_indices if index not in missing_or_stale_set]
