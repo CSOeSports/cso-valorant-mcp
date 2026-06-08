@@ -13,11 +13,14 @@ Usage:
   uv run mcp dev src/valorant_mcp_server/server.py  # MCP Inspector
 """
 
-import json
+import asyncio
 import hmac
+import json
 import os
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1329,6 +1332,78 @@ def _dashboard_refresh_players_per_request(request: Request, roster_size: int) -
     configured = os.getenv("VALORANT_DASHBOARD_REFRESH_PLAYERS_PER_REQUEST", "4")
     requested = request.query_params.get("refreshPlayers", configured)
     return _dashboard_int(requested, 4, min_value=1, max_value=max(1, roster_size))
+
+
+def _dashboard_convex_ingest_url() -> str | None:
+    value = os.getenv("CONVEX_DASHBOARD_INGEST_URL") or os.getenv("CONVEX_INGEST_URL")
+    return value.strip() if value and value.strip() else None
+
+
+def _dashboard_convex_ingest_token() -> str | None:
+    value = os.getenv("CONVEX_DASHBOARD_INGEST_TOKEN") or os.getenv("CONVEX_INGEST_TOKEN")
+    return value.strip() if value and value.strip() else None
+
+
+def _dashboard_convex_timeout_seconds() -> int:
+    return _dashboard_int(
+        os.getenv("CONVEX_DASHBOARD_INGEST_TIMEOUT_SECONDS", "10"),
+        10,
+        min_value=1,
+        max_value=60,
+    )
+
+
+def _dashboard_post_snapshot_to_convex_sync(snapshot: dict[str, Any]) -> dict[str, Any]:
+    ingest_url = _dashboard_convex_ingest_url()
+    ingest_token = _dashboard_convex_ingest_token()
+    if not ingest_url or not ingest_token:
+        return {"status": "disabled"}
+
+    body = json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        ingest_url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {ingest_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=_dashboard_convex_timeout_seconds(),
+        ) as response:
+            raw = response.read(65536).decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(raw) if raw else None
+            except Exception:
+                payload = {"raw": raw[:1000]}
+            return {
+                "status": "ok",
+                "statusCode": response.status,
+                "response": payload,
+            }
+    except urllib.error.HTTPError as exc:
+        raw = exc.read(4096).decode("utf-8", errors="replace")
+        return {
+            "status": "error",
+            "statusCode": exc.code,
+            "message": raw[:1000],
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": str(exc),
+        }
+
+
+async def _dashboard_mirror_snapshot_to_convex(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    if not _dashboard_convex_ingest_url() or not _dashboard_convex_ingest_token():
+        return None
+    return await asyncio.to_thread(_dashboard_post_snapshot_to_convex_sync, snapshot)
 
 
 def _dashboard_is_good_aggregate(aggregate: dict[str, Any] | None) -> bool:
@@ -2937,6 +3012,10 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
             "matchDetailCacheFileEnabled": _dashboard_match_detail_cache_file() is not None,
         },
     }
+
+    convex_mirror = await _dashboard_mirror_snapshot_to_convex(snapshot)
+    if convex_mirror is not None:
+        snapshot["convexMirror"] = convex_mirror
 
     _DASHBOARD_CACHE = snapshot
     _DASHBOARD_CACHE_KEY = cache_key
