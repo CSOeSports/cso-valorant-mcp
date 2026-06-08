@@ -1166,6 +1166,15 @@ def _dashboard_match_detail_cache_max_entries() -> int:
     )
 
 
+def _dashboard_match_details_mirror_limit() -> int:
+    return _dashboard_int(
+        os.getenv("VALORANT_DASHBOARD_MATCH_DETAILS_MIRROR_LIMIT", "50"),
+        50,
+        min_value=0,
+        max_value=500,
+    )
+
+
 def _dashboard_load_match_detail_cache() -> None:
     global _DASHBOARD_MATCH_DETAIL_CACHE, _DASHBOARD_MATCH_DETAIL_CACHE_LOADED
 
@@ -1261,6 +1270,76 @@ async def _get_match_details_v4_cached(region: Region, match_id: str) -> dict[st
         _dashboard_prune_match_detail_cache(now_ts)
         _dashboard_save_match_detail_cache()
     return payload
+
+
+def _dashboard_compact_match_detail_for_mirror(
+    cache_key: str,
+    entry: dict[str, Any],
+) -> dict[str, Any] | None:
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return None
+
+    region, _, fallback_match_id = cache_key.partition(":")
+    match_id = _extract_match_id(payload) or fallback_match_id
+    if not match_id:
+        return None
+
+    meta = _match_meta(payload)
+    started_at = _extract_match_started_at(payload)
+    rows = _player_rows_from_match(payload)
+    players = [
+        {
+            "riotId": _player_identity(row),
+            "puuid": row.get("puuid"),
+            "agent": _agent_name(row),
+            "team": row.get("team") or row.get("team_id") or row.get("teamId"),
+            **_player_stats(row),
+        }
+        for row in rows
+        if isinstance(row, dict)
+    ]
+
+    return {
+        "matchKey": f"{region.lower()}:{match_id}",
+        "region": region.lower(),
+        "matchId": match_id,
+        "map": _map_name_from_match(payload),
+        "mode": _extract_queue_name(payload),
+        "platform": meta.get("platform"),
+        "startedAt": started_at.isoformat() if started_at else None,
+        "gameLengthSeconds": _extract_match_length_seconds(payload),
+        "teams": _team_score_summary(payload),
+        "playersCount": len(players),
+        "players": players,
+        "cachedAt": entry.get("updatedAt"),
+        "cachedAtMs": int(float(entry.get("updatedTs") or 0) * 1000),
+        "source": "valorant_mcp_match_detail_cache",
+    }
+
+
+def _dashboard_match_details_for_mirror() -> list[dict[str, Any]]:
+    limit = _dashboard_match_details_mirror_limit()
+    if limit <= 0:
+        return []
+
+    now_ts = time.time()
+    _dashboard_load_match_detail_cache()
+    _dashboard_prune_match_detail_cache(now_ts)
+
+    rows: list[dict[str, Any]] = []
+    for cache_key, entry in sorted(
+        _DASHBOARD_MATCH_DETAIL_CACHE.items(),
+        key=lambda item: float(item[1].get("updatedTs") or 0),
+        reverse=True,
+    ):
+        compact = _dashboard_compact_match_detail_for_mirror(cache_key, entry)
+        if compact:
+            rows.append(compact)
+        if len(rows) >= limit:
+            break
+
+    return rows
 
 
 def _dashboard_mode(value: Any, default: str | None = "competitive") -> str | None:
@@ -3129,6 +3208,7 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
         _dashboard_save_player_cache()
 
     generated_at = datetime.now(timezone.utc).isoformat()
+    match_details_for_mirror = _dashboard_match_details_for_mirror()
     snapshot = {
         "generatedAt": generated_at,
         "servedAt": generated_at,
@@ -3153,6 +3233,7 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
             )
             for player in roster
         ],
+        "matchDetails": match_details_for_mirror,
         "errors": refresh_errors,
         "cache": {"status": "miss", "ttlSeconds": cache_seconds},
         "rollingCache": {
@@ -3186,6 +3267,8 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
             "playerCacheFileEnabled": _dashboard_player_cache_file() is not None,
             "matchDetailCacheTtlSeconds": _dashboard_match_detail_cache_ttl_seconds(),
             "matchDetailCacheEntries": len(_DASHBOARD_MATCH_DETAIL_CACHE),
+            "matchDetailsMirrored": len(match_details_for_mirror),
+            "matchDetailsMirrorLimit": _dashboard_match_details_mirror_limit(),
             "matchDetailCacheFileEnabled": _dashboard_match_detail_cache_file() is not None,
         },
     }
