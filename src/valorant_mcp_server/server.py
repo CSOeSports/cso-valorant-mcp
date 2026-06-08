@@ -772,6 +772,7 @@ async def _collect_player_window_stats(
             break
 
         reached_old_match = False
+        reached_rate_limit = False
         for item in history_rows:
             if not isinstance(item, dict):
                 continue
@@ -787,6 +788,13 @@ async def _collect_player_window_stats(
 
             try:
                 details = await _get_match_details_v4_cached(region, match_id)
+                if isinstance(details, dict) and details.get("error"):
+                    errors.append({"reason": "detail_error", "match_id": match_id, "payload": details})
+                    if _payload_status_code(details) == 429:
+                        reached_rate_limit = True
+                        break
+                    continue
+
                 compact = _compact_player_match_stats(
                     details,
                     region=region,
@@ -800,11 +808,14 @@ async def _collect_player_window_stats(
                     errors.append({"reason": "player_not_found", "match_id": match_id})
             except Exception as exc:
                 errors.append({"reason": "detail_error", "match_id": match_id, "error": str(exc)})
+                if "429" in str(exc) or "too many requests" in str(exc).lower():
+                    reached_rate_limit = True
+                    break
 
             if len(rows) >= max_details:
                 break
 
-        if reached_old_match or len(rows) >= max_details:
+        if reached_old_match or reached_rate_limit or len(rows) >= max_details:
             break
 
     return rows, errors
@@ -1063,6 +1074,17 @@ def _dashboard_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _payload_status_code(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+
+    raw_status = payload.get("status_code") or payload.get("status")
+    try:
+        return int(raw_status)
+    except Exception:
+        return None
 
 
 def _dashboard_match_detail_cache_file() -> Path | None:
