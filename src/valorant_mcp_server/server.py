@@ -786,7 +786,7 @@ async def _collect_player_window_stats(
             seen_match_ids.add(match_id)
 
             try:
-                details = await get_match_details_v4(region, match_id)
+                details = await _get_match_details_v4_cached(region, match_id)
                 compact = _compact_player_match_stats(
                     details,
                     region=region,
@@ -1020,6 +1020,8 @@ _DASHBOARD_CACHE_KEY: str | None = None
 _DASHBOARD_CACHE_EXPIRES_AT = 0.0
 _DASHBOARD_PLAYER_CACHE: dict[str, dict[str, Any]] = {}
 _DASHBOARD_PLAYER_CACHE_LOADED = False
+_DASHBOARD_MATCH_DETAIL_CACHE: dict[str, dict[str, Any]] = {}
+_DASHBOARD_MATCH_DETAIL_CACHE_LOADED = False
 _DASHBOARD_ROLLING_CURSOR_BY_KEY: dict[str, int] = {}
 
 
@@ -1061,6 +1063,133 @@ def _dashboard_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _dashboard_match_detail_cache_file() -> Path | None:
+    configured = os.getenv("VALORANT_DASHBOARD_MATCH_DETAIL_CACHE_FILE")
+    if configured and configured.strip().lower() in {"0", "false", "off", "none"}:
+        return None
+
+    path = configured or os.path.join(
+        tempfile.gettempdir(),
+        "cso-valorant-dashboard-match-detail-cache.json",
+    )
+    return Path(path)
+
+
+def _dashboard_match_detail_cache_ttl_seconds() -> int:
+    return _dashboard_int(
+        os.getenv("VALORANT_DASHBOARD_MATCH_DETAIL_CACHE_TTL_SECONDS", "604800"),
+        604800,
+        min_value=0,
+        max_value=2592000,
+    )
+
+
+def _dashboard_match_detail_cache_max_entries() -> int:
+    return _dashboard_int(
+        os.getenv("VALORANT_DASHBOARD_MATCH_DETAIL_CACHE_MAX_ENTRIES", "500"),
+        500,
+        min_value=25,
+        max_value=5000,
+    )
+
+
+def _dashboard_load_match_detail_cache() -> None:
+    global _DASHBOARD_MATCH_DETAIL_CACHE, _DASHBOARD_MATCH_DETAIL_CACHE_LOADED
+
+    if _DASHBOARD_MATCH_DETAIL_CACHE_LOADED:
+        return
+
+    _DASHBOARD_MATCH_DETAIL_CACHE_LOADED = True
+    cache_file = _dashboard_match_detail_cache_file()
+    if cache_file is None or not cache_file.exists():
+        return
+
+    try:
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+
+    matches_payload = payload.get("matches") if isinstance(payload, dict) else None
+    if isinstance(matches_payload, dict):
+        _DASHBOARD_MATCH_DETAIL_CACHE = {
+            str(key): value
+            for key, value in matches_payload.items()
+            if isinstance(value, dict)
+        }
+
+
+def _dashboard_prune_match_detail_cache(now_ts: float) -> None:
+    ttl_seconds = _dashboard_match_detail_cache_ttl_seconds()
+    if ttl_seconds > 0:
+        expired_keys = [
+            key
+            for key, entry in _DASHBOARD_MATCH_DETAIL_CACHE.items()
+            if now_ts - float(entry.get("updatedTs") or 0) > ttl_seconds
+        ]
+        for key in expired_keys:
+            _DASHBOARD_MATCH_DETAIL_CACHE.pop(key, None)
+
+    max_entries = _dashboard_match_detail_cache_max_entries()
+    if len(_DASHBOARD_MATCH_DETAIL_CACHE) <= max_entries:
+        return
+
+    ordered = sorted(
+        _DASHBOARD_MATCH_DETAIL_CACHE.items(),
+        key=lambda item: float(item[1].get("updatedTs") or 0),
+    )
+    for key, _ in ordered[: len(_DASHBOARD_MATCH_DETAIL_CACHE) - max_entries]:
+        _DASHBOARD_MATCH_DETAIL_CACHE.pop(key, None)
+
+
+def _dashboard_save_match_detail_cache() -> None:
+    cache_file = _dashboard_match_detail_cache_file()
+    if cache_file is None:
+        return
+
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_file = cache_file.with_suffix(f"{cache_file.suffix}.tmp")
+        tmp_file.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "savedAt": datetime.now(timezone.utc).isoformat(),
+                    "matches": _DASHBOARD_MATCH_DETAIL_CACHE,
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        tmp_file.replace(cache_file)
+    except Exception:
+        return
+
+
+async def _get_match_details_v4_cached(region: Region, match_id: str) -> dict[str, Any]:
+    now_ts = time.time()
+    cache_key = f"{str(region).lower()}:{match_id}"
+    ttl_seconds = _dashboard_match_detail_cache_ttl_seconds()
+
+    _dashboard_load_match_detail_cache()
+    entry = _DASHBOARD_MATCH_DETAIL_CACHE.get(cache_key)
+    if isinstance(entry, dict):
+        payload = entry.get("payload")
+        updated_ts = float(entry.get("updatedTs") or 0)
+        if isinstance(payload, dict) and (ttl_seconds <= 0 or now_ts - updated_ts <= ttl_seconds):
+            return payload
+
+    payload = await get_match_details_v4(region, match_id)
+    if isinstance(payload, dict) and not payload.get("error"):
+        _DASHBOARD_MATCH_DETAIL_CACHE[cache_key] = {
+            "updatedAt": datetime.fromtimestamp(now_ts, timezone.utc).isoformat(),
+            "updatedTs": now_ts,
+            "payload": payload,
+        }
+        _dashboard_prune_match_detail_cache(now_ts)
+        _dashboard_save_match_detail_cache()
+    return payload
 
 
 def _dashboard_mode(value: Any, default: str | None = "competitive") -> str | None:
@@ -1314,6 +1443,73 @@ def _dashboard_signal_refresh_ready(
     if updated_ts <= 0:
         return True
     return now_ts - updated_ts >= _dashboard_signal_refresh_cooldown_seconds()
+
+
+def _dashboard_weak_scan_limits(
+    *,
+    page_size: int,
+    max_pages: int,
+    max_details: int,
+) -> dict[str, int]:
+    return {
+        "pageSize": max(
+            page_size,
+            _dashboard_int(
+                os.getenv("VALORANT_DASHBOARD_WEAK_PAGE_SIZE", "5"),
+                5,
+                min_value=1,
+                max_value=10,
+            ),
+        ),
+        "maxPages": max(
+            max_pages,
+            _dashboard_int(
+                os.getenv("VALORANT_DASHBOARD_WEAK_MAX_PAGES", "6"),
+                6,
+                min_value=1,
+                max_value=10,
+            ),
+        ),
+        "maxDetailsPerPlayer": max(
+            max_details,
+            _dashboard_int(
+                os.getenv("VALORANT_DASHBOARD_WEAK_MAX_DETAILS_PER_PLAYER", "10"),
+                10,
+                min_value=1,
+                max_value=50,
+            ),
+        ),
+    }
+
+
+def _dashboard_scan_limits_for_cached_signal(
+    aggregate: dict[str, Any] | None,
+    *,
+    page_size: int,
+    max_pages: int,
+    max_details: int,
+) -> dict[str, Any]:
+    normal_limits = {
+        "pageSize": page_size,
+        "maxPages": max_pages,
+        "maxDetailsPerPlayer": max_details,
+    }
+    if not _dashboard_is_weak_signal(aggregate):
+        return {
+            **normal_limits,
+            "profile": "normal",
+            "signalTier": _dashboard_signal_tier(aggregate),
+        }
+
+    return {
+        **_dashboard_weak_scan_limits(
+            page_size=page_size,
+            max_pages=max_pages,
+            max_details=max_details,
+        ),
+        "profile": "weak",
+        "signalTier": _dashboard_signal_tier(aggregate),
+    }
 
 
 def _dashboard_cached_aggregate(
@@ -2376,24 +2572,51 @@ async def get_bulk_player_backfill_aggregates(
             errors.append({"index": index, "reason": "missing_identifier", "input": player})
             continue
 
+        player_page_size = _dashboard_int(
+            player.get("pageSize") or player.get("page_size"),
+            page_size,
+            min_value=1,
+            max_value=10,
+        )
+        player_max_pages = _dashboard_int(
+            player.get("maxPages") or player.get("max_pages"),
+            max_pages,
+            min_value=1,
+            max_value=10,
+        )
+        player_max_details = _dashboard_int(
+            player.get("maxDetailsPerPlayer")
+            or player.get("max_details_per_player")
+            or player.get("max_details"),
+            max_details_per_player,
+            min_value=1,
+            max_value=50,
+        )
+
         try:
-            results.append(
-                await get_player_backfill_aggregate(
-                    region=player.get("region", default_region),
-                    platform=player.get("platform", default_platform),
-                    days=days,
-                    mode=mode,
-                    name=name,
-                    tag=tag,
-                    puuid=puuid,
-                    page_size=page_size,
-                    max_pages=max_pages,
-                    max_details=max_details_per_player,
-                    include_matches=False,
-                    include_rr=include_rr,
-                    include_weekly_playtime=include_weekly_playtime,
-                )
+            aggregate = await get_player_backfill_aggregate(
+                region=player.get("region", default_region),
+                platform=player.get("platform", default_platform),
+                days=days,
+                mode=mode,
+                name=name,
+                tag=tag,
+                puuid=puuid,
+                page_size=player_page_size,
+                max_pages=player_max_pages,
+                max_details=player_max_details,
+                include_matches=False,
+                include_rr=include_rr,
+                include_weekly_playtime=include_weekly_playtime,
             )
+            aggregate["scan"] = {
+                "pageSize": player_page_size,
+                "maxPages": player_max_pages,
+                "maxDetailsPerPlayer": player_max_details,
+                "profile": player.get("scanProfile") or "normal",
+                "requestedSignalTier": player.get("signalTier"),
+            }
+            results.append(aggregate)
         except Exception as exc:
             errors.append({"index": index, "input": player, "reason": "aggregate_error", "error": str(exc)})
 
@@ -2519,19 +2742,40 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
     selected_indices = {index for index, _ in selected_players}
     refresh_errors: list[dict[str, Any]] = []
     refresh_results: dict[str, dict[str, Any]] = {}
+    selected_scan_limits: dict[str, dict[str, Any]] = {}
 
     if selected_players:
+        player_requests: list[dict[str, Any]] = []
+        for index, player in selected_players:
+            cached = None if bypass_player_cache else _dashboard_cached_aggregate(
+                player_cache_keys[index],
+                now_ts=now_ts,
+                ttl_seconds=player_cache_ttl_seconds,
+            )
+            scan_limits = _dashboard_scan_limits_for_cached_signal(
+                cached,
+                page_size=page_size,
+                max_pages=max_pages,
+                max_details=max_details,
+            )
+            selected_scan_limits[_dashboard_player_label(player)] = scan_limits
+            player_requests.append(
+                {
+                    "name": player.get("name"),
+                    "tag": player.get("tag"),
+                    "region": player.get("region", "eu"),
+                    "platform": player.get("platform", "pc"),
+                    "pageSize": scan_limits["pageSize"],
+                    "maxPages": scan_limits["maxPages"],
+                    "maxDetailsPerPlayer": scan_limits["maxDetailsPerPlayer"],
+                    "scanProfile": scan_limits["profile"],
+                    "signalTier": scan_limits["signalTier"],
+                }
+            )
+
         try:
             aggregate = await get_bulk_player_backfill_aggregates(
-                players=[
-                    {
-                        "name": player.get("name"),
-                        "tag": player.get("tag"),
-                        "region": player.get("region", "eu"),
-                        "platform": player.get("platform", "pc"),
-                    }
-                    for _, player in selected_players
-                ],
+                players=player_requests,
                 default_region="eu",
                 default_platform="pc",
                 days=days,
@@ -2640,15 +2884,35 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
         "rollingCache": {
             "refreshPlayersPerRequest": refresh_players,
             "selectionPolicy": "weak-signal-first",
+            "scanPolicy": "weak-signal-deep-scan",
+            "normalScan": {
+                "pageSize": page_size,
+                "maxPages": max_pages,
+                "maxDetailsPerPlayer": max_details,
+            },
+            "weakSignalScan": _dashboard_weak_scan_limits(
+                page_size=page_size,
+                max_pages=max_pages,
+                max_details=max_details,
+            ),
             "signalRefreshCooldownSeconds": _dashboard_signal_refresh_cooldown_seconds(),
             "playersSelectedForRefresh": [
                 _dashboard_player_label(player) for _, player in selected_players
             ],
+            "playersDeepScanned": [
+                player
+                for player, limits in selected_scan_limits.items()
+                if limits.get("profile") == "weak"
+            ],
+            "selectedScanLimits": selected_scan_limits,
             "playersRefreshedWithUsableStats": refreshed_count,
             "playersServedFromLastGoodCache": last_good_count,
             "playersWithoutUsableStats": limited_uncached_count,
             "playerCacheTtlSeconds": player_cache_ttl_seconds,
             "playerCacheFileEnabled": _dashboard_player_cache_file() is not None,
+            "matchDetailCacheTtlSeconds": _dashboard_match_detail_cache_ttl_seconds(),
+            "matchDetailCacheEntries": len(_DASHBOARD_MATCH_DETAIL_CACHE),
+            "matchDetailCacheFileEnabled": _dashboard_match_detail_cache_file() is not None,
         },
     }
 
