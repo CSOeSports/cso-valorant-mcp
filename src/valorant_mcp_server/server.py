@@ -1175,7 +1175,12 @@ def _dashboard_is_good_aggregate(aggregate: dict[str, Any] | None) -> bool:
     if not isinstance(aggregate, dict):
         return False
 
-    return int(aggregate.get("matches_counted") or 0) > 0
+    return (
+        int(aggregate.get("matches_counted") or 0) > 0
+        or aggregate.get("rr") is not None
+        or int(aggregate.get("weekly_playtime_seconds") or 0) > 0
+        or int(aggregate.get("weekly_playtime_matches") or 0) > 0
+    )
 
 
 def _dashboard_has_impact_stats(aggregate: dict[str, Any] | None) -> bool:
