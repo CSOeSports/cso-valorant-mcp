@@ -273,6 +273,46 @@ def _current_rank_name(payload: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _rank_tier_name(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+
+    tier = value.get("tier")
+    if isinstance(tier, dict):
+        for key in ("name", "displayName", "display_name"):
+            name = tier.get(key)
+            if name:
+                return str(name)
+
+    for key in ("tier_name", "tierName", "rank", "name"):
+        name = value.get(key)
+        if name:
+            return str(name)
+
+    return None
+
+
+def _peak_rank_name(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    peak = payload.get("peak")
+    peak_name = _rank_tier_name(peak)
+    if peak_name:
+        return peak_name
+
+    for key in ("peak_rank", "peakRank", "highest_rank", "highestRank"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            name = _rank_tier_name(value)
+            if name:
+                return name
+        elif value:
+            return str(value)
+
+    return None
+
+
 async def _collect_player_rr_summary(
     *,
     region: Region,
@@ -290,6 +330,8 @@ async def _collect_player_rr_summary(
         "rr_weekly_delta": None,
         "rr_weekly_matches": 0,
         "current_rank": None,
+        "peak_rank": None,
+        "peak_rank_source": None,
         "last_ranked_at": None,
         "rank_confidence": "low",
         "rank_errors": [],
@@ -304,6 +346,10 @@ async def _collect_player_rr_summary(
             output["rr_delta"] = current.get("last_change")
             output["elo"] = current.get("elo")
         output["current_rank"] = _current_rank_name(current_payload)
+        peak_rank = _peak_rank_name(current_payload)
+        if peak_rank:
+            output["peak_rank"] = peak_rank
+            output["peak_rank_source"] = "henrik_mmr"
     except Exception as exc:
         errors.append({"reason": "current_mmr_error", "error": str(exc)})
 
@@ -866,8 +912,8 @@ DEFAULT_DASHBOARD_ROSTER: list[dict[str, Any]] = [
         "tag": "BUZZ",
         "team": "CSO AllSorts",
         "country": "South Africa",
-        "peakRank": "Silver 1",
-        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20DagDroom%23007/overview?platform=pc&playlist=competitive&season=ac12e9b3-47e6-9599-8fa1-0bb473e5efc7",
+        "peakRank": "Gold 2",
+        "trackerUrl": "https://tracker.gg/valorant/profile/riot/CSO%20BumbleB%23BUZZ/overview?platform=pc&playlist=competitive",
         "region": "eu",
         "platform": "pc",
     },
@@ -1881,6 +1927,8 @@ def _dashboard_player_stats(player: dict[str, Any], aggregate: dict[str, Any] | 
         "rrWeeklyDelta": aggregate.get("rr_weekly_delta") if aggregate else None,
         "rrWeeklyMatches": aggregate.get("rr_weekly_matches", 0) if aggregate else 0,
         "currentRank": aggregate.get("current_rank") if aggregate else None,
+        "peakRank": aggregate.get("peak_rank") if aggregate else None,
+        "peakRankSource": aggregate.get("peak_rank_source") if aggregate else None,
         "lastRankedAt": aggregate.get("last_ranked_at") if aggregate else None,
         "weeklyPlaytimeSeconds": aggregate.get("weekly_playtime_seconds", 0) if aggregate else 0,
         "weeklyPlaytimeHours": aggregate.get("weekly_playtime_hours", 0) if aggregate else 0,
@@ -1891,6 +1939,43 @@ def _dashboard_player_stats(player: dict[str, Any], aggregate: dict[str, Any] | 
         "weeklyPlaytimeConfidence": aggregate.get("weekly_playtime_confidence") if aggregate else "low",
         "confidence": aggregate.get("confidence", "low") if aggregate else "low",
         "errorCount": len(errors),
+    }
+
+
+def _dashboard_player_peak_rank(
+    player: dict[str, Any],
+    aggregate: dict[str, Any] | None,
+) -> tuple[str, str]:
+    if aggregate:
+        peak_rank = aggregate.get("peak_rank")
+        if peak_rank:
+            return str(peak_rank), str(aggregate.get("peak_rank_source") or "henrik_mmr")
+
+    roster_peak = player.get("peakRank") or player.get("peak_rank")
+    if roster_peak:
+        return str(roster_peak), "roster"
+
+    return "Unranked", "unknown"
+
+
+def _dashboard_player_payload(
+    player: dict[str, Any],
+    aggregate: dict[str, Any] | None,
+) -> dict[str, Any]:
+    stats = _dashboard_player_stats(player, aggregate)
+    peak_rank, peak_rank_source = _dashboard_player_peak_rank(player, aggregate)
+
+    return {
+        "id": player.get("id") or str(player.get("riotId", "")).lower().replace(" ", "-").replace("#", "-"),
+        "rosterName": player.get("rosterName") or player.get("roster_name") or player.get("name"),
+        "riotId": player.get("riotId") or f"{player.get('name')}#{player.get('tag')}",
+        "team": player.get("team") or "CSO Valorant",
+        "status": "Active",
+        "country": player.get("country") or "South Africa",
+        "peakRank": peak_rank,
+        "peakRankSource": peak_rank_source,
+        "trackerUrl": player.get("trackerUrl") or player.get("tracker_url"),
+        "stats": stats,
     }
 
 
@@ -3062,20 +3147,10 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
             "Null metrics mean the source payload did not expose enough data; values are not invented.",
         ],
         "players": [
-            {
-                "id": player.get("id") or str(player.get("riotId", "")).lower().replace(" ", "-").replace("#", "-"),
-                "rosterName": player.get("rosterName") or player.get("roster_name") or player.get("name"),
-                "riotId": player.get("riotId") or f"{player.get('name')}#{player.get('tag')}",
-                "team": player.get("team") or "CSO Valorant",
-                "status": "Active",
-                "country": player.get("country") or "South Africa",
-                "peakRank": player.get("peakRank") or player.get("peak_rank") or "Unranked",
-                "trackerUrl": player.get("trackerUrl") or player.get("tracker_url"),
-                "stats": _dashboard_player_stats(
-                    player,
-                    aggregates_by_player.get(_dashboard_player_label(player).lower()),
-                ),
-            }
+            _dashboard_player_payload(
+                player,
+                aggregates_by_player.get(_dashboard_player_label(player).lower()),
+            )
             for player in roster
         ],
         "errors": refresh_errors,
