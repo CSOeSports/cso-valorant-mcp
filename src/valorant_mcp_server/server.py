@@ -1282,6 +1282,40 @@ def _dashboard_refresh_priority(
     return base + age_boost
 
 
+def _dashboard_signal_tier(aggregate: dict[str, Any] | None) -> str:
+    if not isinstance(aggregate, dict):
+        return "missing"
+
+    if not _dashboard_has_impact_stats(aggregate):
+        return "incomplete"
+
+    confidence = str(aggregate.get("confidence") or "low").lower()
+    if confidence in {"low", "medium", "high"}:
+        return confidence
+    return "low"
+
+
+def _dashboard_is_weak_signal(aggregate: dict[str, Any] | None) -> bool:
+    return _dashboard_signal_tier(aggregate) != "high"
+
+
+def _dashboard_signal_refresh_ready(
+    aggregate: dict[str, Any] | None,
+    *,
+    now_ts: float,
+) -> bool:
+    tier = _dashboard_signal_tier(aggregate)
+    if tier in {"missing", "incomplete"}:
+        return True
+    if tier == "high":
+        return False
+
+    updated_ts = _dashboard_cache_updated_ts(aggregate)
+    if updated_ts <= 0:
+        return True
+    return now_ts - updated_ts >= _dashboard_signal_refresh_cooldown_seconds()
+
+
 def _dashboard_cached_aggregate(
     cache_key: str,
     *,
@@ -1356,14 +1390,28 @@ def _dashboard_select_refresh_players(
             now_ts=now_ts,
             ttl_seconds=ttl_seconds,
         )
-        prioritized_indices.append((priority, rolling_position, index))
+        prioritized_indices.append(
+            (
+                priority,
+                _dashboard_is_weak_signal(cached),
+                _dashboard_signal_refresh_ready(cached, now_ts=now_ts),
+                rolling_position,
+                index,
+            )
+        )
 
-    prioritized_indices.sort(key=lambda item: (-item[0], item[1]))
-    selected = prioritized_indices[:refresh_count]
-    selected_indices = [index for _, _, index in selected]
+    weak_indices = [item for item in prioritized_indices if item[1]]
+    if weak_indices:
+        eligible_indices = [item for item in weak_indices if item[2]]
+    else:
+        eligible_indices = prioritized_indices
+
+    eligible_indices.sort(key=lambda item: (-item[0], item[3]))
+    selected = eligible_indices[:refresh_count]
+    selected_indices = [index for _, _, _, _, index in selected]
 
     if selected:
-        _, _, furthest_selected_index = max(selected, key=lambda item: item[1])
+        *_, furthest_selected_index = max(selected, key=lambda item: item[3])
         _DASHBOARD_ROLLING_CURSOR_BY_KEY[rolling_key] = (furthest_selected_index + 1) % len(roster)
 
     return [(index, roster[index]) for index in selected_indices]
@@ -2591,7 +2639,7 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
         "cache": {"status": "miss", "ttlSeconds": cache_seconds},
         "rollingCache": {
             "refreshPlayersPerRequest": refresh_players,
-            "selectionPolicy": "signal-aware",
+            "selectionPolicy": "weak-signal-first",
             "signalRefreshCooldownSeconds": _dashboard_signal_refresh_cooldown_seconds(),
             "playersSelectedForRefresh": [
                 _dashboard_player_label(player) for _, player in selected_players
