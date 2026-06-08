@@ -1617,6 +1617,37 @@ def _dashboard_cached_aggregate(
 ) -> dict[str, Any] | None:
     _dashboard_load_player_cache()
     entry = _DASHBOARD_PLAYER_CACHE.get(cache_key)
+    cached = _dashboard_cached_aggregate_from_entry(
+        entry,
+        now_ts=now_ts,
+        ttl_seconds=ttl_seconds,
+        status="last_good",
+    )
+    if cached and _dashboard_is_good_aggregate(cached):
+        confidence = str(cached.get("confidence") or "low").lower()
+        if confidence in {"medium", "high"}:
+            return cached
+    if cached and _dashboard_signal_tier(cached) not in {"low", "missing", "incomplete"}:
+        return cached
+
+    fallback = _dashboard_fallback_cached_aggregate(
+        cache_key,
+        now_ts=now_ts,
+        ttl_seconds=ttl_seconds,
+    )
+    if fallback:
+        return fallback
+
+    return cached
+
+
+def _dashboard_cached_aggregate_from_entry(
+    entry: Any,
+    *,
+    now_ts: float,
+    ttl_seconds: int,
+    status: str,
+) -> dict[str, Any] | None:
     if not isinstance(entry, dict):
         return None
 
@@ -1630,11 +1661,82 @@ def _dashboard_cached_aggregate(
 
     cached = dict(aggregate)
     cached["dashboard_cache"] = {
-        "status": "last_good",
+        "status": status,
         "updatedAt": entry.get("updatedAt"),
         "updatedTs": updated_ts,
     }
     return cached
+
+
+def _dashboard_cache_key_payload(cache_key: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(cache_key)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _dashboard_cache_key_matches_player_window(
+    candidate_key: str,
+    target: dict[str, Any],
+) -> bool:
+    candidate = _dashboard_cache_key_payload(candidate_key)
+    if candidate is None:
+        return False
+
+    for field in (
+        "player",
+        "region",
+        "platform",
+        "days",
+        "mode",
+        "include_rr",
+        "include_weekly_playtime",
+    ):
+        if candidate.get(field) != target.get(field):
+            return False
+    return True
+
+
+def _dashboard_fallback_cached_aggregate(
+    cache_key: str,
+    *,
+    now_ts: float,
+    ttl_seconds: int,
+) -> dict[str, Any] | None:
+    target = _dashboard_cache_key_payload(cache_key)
+    if target is None:
+        return None
+
+    best: tuple[int, int, float, dict[str, Any]] | None = None
+    signal_rank = {"medium": 2, "high": 3}
+    for candidate_key, entry in _DASHBOARD_PLAYER_CACHE.items():
+        if candidate_key == cache_key:
+            continue
+        if not _dashboard_cache_key_matches_player_window(candidate_key, target):
+            continue
+
+        aggregate = _dashboard_cached_aggregate_from_entry(
+            entry,
+            now_ts=now_ts,
+            ttl_seconds=ttl_seconds,
+            status="last_good_fallback",
+        )
+        if not aggregate or not _dashboard_is_good_aggregate(aggregate):
+            continue
+
+        confidence = str(aggregate.get("confidence") or "low").lower()
+        rank = signal_rank.get(confidence)
+        if rank is None:
+            continue
+
+        matches_counted = int(aggregate.get("matches_counted") or 0)
+        updated_ts = _dashboard_cache_updated_ts(aggregate)
+        score = (rank, matches_counted, updated_ts, aggregate)
+        if best is None or score[:3] > best[:3]:
+            best = score
+
+    return best[3] if best else None
 
 
 def _dashboard_update_player_cache(
