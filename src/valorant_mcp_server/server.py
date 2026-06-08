@@ -229,6 +229,215 @@ def _safe_int_value(value: Any, default: int = 0) -> int:
         return default
 
 
+def _mmr_history_started_at(item: dict[str, Any]) -> datetime | None:
+    raw = item.get("date_raw") or item.get("dateRaw") or item.get("timestamp")
+    if raw is not None:
+        try:
+            timestamp = float(raw)
+            if timestamp > 1_000_000_000_000:
+                timestamp = timestamp / 1000
+            return datetime.fromtimestamp(timestamp, timezone.utc)
+        except (TypeError, ValueError, OSError):
+            pass
+
+    parsed = _parse_iso_datetime(item.get("date"))
+    if parsed:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    return None
+
+
+def _current_rank_name(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    current = payload.get("current")
+    if isinstance(current, dict):
+        tier = current.get("tier")
+        if isinstance(tier, dict):
+            name = tier.get("name")
+            if name:
+                return str(name)
+
+    peak = payload.get("peak")
+    if isinstance(peak, dict):
+        tier = peak.get("tier")
+        if isinstance(tier, dict) and tier.get("name"):
+            return str(tier.get("name"))
+
+    return None
+
+
+async def _collect_player_rr_summary(
+    *,
+    region: Region,
+    platform: Platform,
+    name: str,
+    tag: str,
+    days: int = 7,
+) -> dict[str, Any]:
+    now, window_start = _playtime_window(max(1, int(days or 1)))
+    del now
+
+    output: dict[str, Any] = {
+        "rr": None,
+        "rr_delta": None,
+        "rr_weekly_delta": None,
+        "rr_weekly_matches": 0,
+        "current_rank": None,
+        "last_ranked_at": None,
+        "rank_confidence": "low",
+        "rank_errors": [],
+    }
+    errors: list[dict[str, Any]] = []
+
+    try:
+        current_payload = await mmr.get_mmr(region, name, tag, platform)
+        current = current_payload.get("current") if isinstance(current_payload, dict) else None
+        if isinstance(current, dict):
+            output["rr"] = current.get("rr")
+            output["rr_delta"] = current.get("last_change")
+            output["elo"] = current.get("elo")
+        output["current_rank"] = _current_rank_name(current_payload)
+    except Exception as exc:
+        errors.append({"reason": "current_mmr_error", "error": str(exc)})
+
+    try:
+        history_payload = await get_mmr_history_v1(region, name, tag)
+        history = _data_list(history_payload)
+        weekly_delta = 0
+        weekly_matches = 0
+        latest_ranked_at: datetime | None = None
+
+        for item in history:
+            started_at = _mmr_history_started_at(item)
+            if latest_ranked_at is None and started_at is not None:
+                latest_ranked_at = started_at
+            if started_at is None or started_at < window_start:
+                continue
+
+            weekly_delta += _safe_int_value(
+                item.get("mmr_change_to_last_game")
+                if item.get("mmr_change_to_last_game") is not None
+                else item.get("rr_change_to_last_game")
+            )
+            weekly_matches += 1
+
+        output["rr_weekly_delta"] = weekly_delta if weekly_matches else None
+        output["rr_weekly_matches"] = weekly_matches
+        output["last_ranked_at"] = latest_ranked_at.isoformat() if latest_ranked_at else None
+    except Exception as exc:
+        errors.append({"reason": "mmr_history_error", "error": str(exc)})
+
+    output["rank_errors"] = errors
+    output["rank_confidence"] = "high" if not errors and output["rr"] is not None else "medium" if output["rr"] is not None else "low"
+    return output
+
+
+async def _collect_player_weekly_playtime_summary(
+    *,
+    region: Region,
+    platform: Platform,
+    name: str,
+    tag: str,
+    mode: str | None,
+    page_size: int = 10,
+    max_pages: int = 5,
+) -> dict[str, Any]:
+    now, window_start = _playtime_window(7)
+    total_seconds = 0
+    matches_counted = 0
+    skipped = 0
+    daily: dict[str, dict[str, Any]] = {}
+    seen_match_ids: set[str] = set()
+    stopped_due_to_old_match = False
+    page_size = max(1, min(int(page_size or 10), 10))
+    max_pages = max(1, min(int(max_pages or 5), 10))
+
+    for page in range(max_pages):
+        start = page * page_size
+        history = await get_match_history_v4_trimmed(
+            region=region,
+            name=name,
+            tag=tag,
+            platform=platform,
+            mode=mode,
+            size=page_size,
+            start=start,
+        )
+        if history.get("error"):
+            skipped += 1
+            break
+
+        history_rows = history.get("matches") or []
+        if not isinstance(history_rows, list) or not history_rows:
+            break
+
+        for item in history_rows:
+            if not isinstance(item, dict):
+                continue
+            match_id = item.get("match_id")
+            if match_id and match_id in seen_match_ids:
+                continue
+            if match_id:
+                seen_match_ids.add(match_id)
+
+            started_at = _parse_iso_datetime(item.get("started_at"))
+            if started_at and started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if started_at:
+                started_at = started_at.astimezone(timezone.utc)
+            if started_at and started_at < window_start:
+                stopped_due_to_old_match = True
+                continue
+
+            seconds = item.get("game_length_seconds")
+            if seconds is None:
+                skipped += 1
+                continue
+
+            seconds_int = _safe_int_value(seconds)
+            if seconds_int <= 0:
+                skipped += 1
+                continue
+
+            matches_counted += 1
+            total_seconds += seconds_int
+            date_key = started_at.date().isoformat() if started_at else "unknown"
+            day = daily.setdefault(date_key, {"matches": 0, "seconds": 0, "hhmmss": "00:00:00"})
+            day["matches"] += 1
+            day["seconds"] += seconds_int
+            day["hhmmss"] = _format_hhmmss(day["seconds"])
+
+        if stopped_due_to_old_match:
+            break
+
+    confidence = "high"
+    notes: list[str] = []
+    if skipped:
+        confidence = "medium"
+        notes.append("Some competitive matches were skipped because duration metadata was missing or a page failed.")
+    if not stopped_due_to_old_match and matches_counted >= page_size * max_pages:
+        confidence = "medium"
+        notes.append("Weekly playtime scan reached max_pages before confirming the full 7-day window.")
+    if not matches_counted:
+        confidence = "low"
+        notes.append("No competitive matches with duration metadata were found in the 7-day window.")
+
+    return {
+        "weekly_playtime_seconds": total_seconds,
+        "weekly_playtime_hours": round(total_seconds / 3600, 2),
+        "weekly_playtime_hhmmss": _format_hhmmss(total_seconds),
+        "weekly_playtime_matches": matches_counted,
+        "weekly_active_days": len([key for key in daily if key != "unknown"]),
+        "weekly_playtime_daily": daily,
+        "weekly_playtime_confidence": confidence,
+        "weekly_playtime_notes": notes,
+    }
+
+
 def _first_stat_value(row: dict[str, Any], *keys: str) -> Any:
     stats = row.get("stats") if isinstance(row.get("stats"), dict) else {}
     damage = stats.get("damage") if isinstance(stats.get("damage"), dict) else {}
@@ -930,6 +1139,8 @@ def _dashboard_player_cache_key(
     page_size: int,
     max_pages: int,
     max_details: int,
+    include_rr: bool = False,
+    include_weekly_playtime: bool = False,
 ) -> str:
     return json.dumps(
         {
@@ -941,6 +1152,8 @@ def _dashboard_player_cache_key(
             "page_size": page_size,
             "max_pages": max_pages,
             "max_details": max_details,
+            "include_rr": include_rr,
+            "include_weekly_playtime": include_weekly_playtime,
         },
         sort_keys=True,
     )
@@ -980,6 +1193,11 @@ def _dashboard_has_impact_stats(aggregate: dict[str, Any] | None) -> bool:
             "daily_matches",
             "games_today",
             "last_played_at",
+            "rr",
+            "rr_delta",
+            "weekly_playtime_seconds",
+            "weekly_playtime_hours",
+            "weekly_playtime_hhmmss",
         )
     )
 
@@ -1131,7 +1349,19 @@ def _dashboard_player_stats(player: dict[str, Any], aggregate: dict[str, Any] | 
         "dailyMatches": aggregate.get("daily_matches", {}) if aggregate else {},
         "gamesToday": aggregate.get("games_today", 0) if aggregate else 0,
         "lastPlayedAt": aggregate.get("last_played_at") if aggregate else None,
+        "rr": aggregate.get("rr") if aggregate else None,
         "rrDelta": aggregate.get("rr_delta") if aggregate else None,
+        "rrWeeklyDelta": aggregate.get("rr_weekly_delta") if aggregate else None,
+        "rrWeeklyMatches": aggregate.get("rr_weekly_matches", 0) if aggregate else 0,
+        "currentRank": aggregate.get("current_rank") if aggregate else None,
+        "lastRankedAt": aggregate.get("last_ranked_at") if aggregate else None,
+        "weeklyPlaytimeSeconds": aggregate.get("weekly_playtime_seconds", 0) if aggregate else 0,
+        "weeklyPlaytimeHours": aggregate.get("weekly_playtime_hours", 0) if aggregate else 0,
+        "weeklyPlaytimeHhmmss": aggregate.get("weekly_playtime_hhmmss") if aggregate else None,
+        "weeklyCompetitiveMatches": aggregate.get("weekly_playtime_matches", 0) if aggregate else 0,
+        "weeklyActiveDays": aggregate.get("weekly_active_days", 0) if aggregate else 0,
+        "weeklyPlaytimeDaily": aggregate.get("weekly_playtime_daily", {}) if aggregate else {},
+        "weeklyPlaytimeConfidence": aggregate.get("weekly_playtime_confidence") if aggregate else "low",
         "confidence": aggregate.get("confidence", "low") if aggregate else "low",
         "errorCount": len(errors),
     }
@@ -1916,6 +2146,8 @@ async def get_player_backfill_aggregate(
     max_pages: int = 4,
     max_details: int = 20,
     include_matches: bool = False,
+    include_rr: bool = False,
+    include_weekly_playtime: bool = False,
 ) -> dict[str, Any]:
     """Return compact Notion backfill aggregates for one player and date window.
 
@@ -1936,7 +2168,7 @@ async def get_player_backfill_aggregate(
         tag=tag,
         puuid=puuid,
     )
-    return _aggregate_compact_player_matches(
+    output = _aggregate_compact_player_matches(
         compact_matches,
         player=player_label,
         region=region,
@@ -1946,6 +2178,32 @@ async def get_player_backfill_aggregate(
         errors=errors,
         include_matches=include_matches,
     )
+    if name and tag and include_rr:
+        rr_summary = await _collect_player_rr_summary(
+            region=region,
+            platform=platform,
+            name=name,
+            tag=tag,
+            days=7,
+        )
+        output.update(rr_summary)
+        rank_errors = rr_summary.get("rank_errors")
+        if isinstance(rank_errors, list):
+            output["errors"] = [*output.get("errors", []), *rank_errors]
+
+    if name and tag and include_weekly_playtime:
+        playtime_summary = await _collect_player_weekly_playtime_summary(
+            region=region,
+            platform=platform,
+            name=name,
+            tag=tag,
+            mode=mode,
+            page_size=10,
+            max_pages=5,
+        )
+        output.update(playtime_summary)
+
+    return output
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
@@ -1958,6 +2216,8 @@ async def get_bulk_player_backfill_aggregates(
     page_size: int = 5,
     max_pages: int = 4,
     max_details_per_player: int = 20,
+    include_rr: bool = False,
+    include_weekly_playtime: bool = False,
 ) -> dict[str, Any]:
     """Return bulk-safe compact Notion backfill aggregates for multiple players."""
     max_players = 25
@@ -1990,6 +2250,8 @@ async def get_bulk_player_backfill_aggregates(
                     max_pages=max_pages,
                     max_details=max_details_per_player,
                     include_matches=False,
+                    include_rr=include_rr,
+                    include_weekly_playtime=include_weekly_playtime,
                 )
             )
         except Exception as exc:
@@ -2044,6 +2306,11 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
         os.getenv("VALORANT_DASHBOARD_MODE", "competitive"),
     )
     mode_label = mode or "all"
+    include_rr = _dashboard_bool(request.query_params.get("includeRR"), True)
+    include_weekly_playtime = _dashboard_bool(
+        request.query_params.get("includeWeeklyPlaytime"),
+        True,
+    )
     cache_seconds = _dashboard_cache_seconds(request)
     player_cache_ttl_seconds = _dashboard_player_cache_ttl_seconds(request)
     refresh_players = _dashboard_refresh_players_per_request(request, len(roster))
@@ -2062,6 +2329,8 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
             "mode": mode_label,
             "refresh_players": refresh_players,
             "player_cache_ttl_seconds": player_cache_ttl_seconds,
+            "include_rr": include_rr,
+            "include_weekly_playtime": include_weekly_playtime,
         },
         sort_keys=True,
     )
@@ -2094,6 +2363,8 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
             page_size=page_size,
             max_pages=max_pages,
             max_details=max_details,
+            include_rr=include_rr,
+            include_weekly_playtime=include_weekly_playtime,
         )
         for player in roster
     ]
@@ -2128,6 +2399,8 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
                 page_size=page_size,
                 max_pages=max_pages,
                 max_details_per_player=max_details,
+                include_rr=include_rr,
+                include_weekly_playtime=include_weekly_playtime,
             )
         except Exception as exc:
             aggregate = {"results": [], "errors": [{"reason": "refresh_failed", "error": str(exc)}]}
