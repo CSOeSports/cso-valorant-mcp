@@ -1218,6 +1218,70 @@ def _dashboard_has_impact_stats(aggregate: dict[str, Any] | None) -> bool:
     )
 
 
+def _dashboard_cache_updated_ts(aggregate: dict[str, Any] | None) -> float:
+    if not isinstance(aggregate, dict):
+        return 0.0
+
+    dashboard_cache = aggregate.get("dashboard_cache")
+    if not isinstance(dashboard_cache, dict):
+        return 0.0
+
+    raw_ts = dashboard_cache.get("updatedTs")
+    if raw_ts is not None:
+        try:
+            return float(raw_ts)
+        except (TypeError, ValueError):
+            pass
+
+    updated_at = _parse_iso_datetime(dashboard_cache.get("updatedAt"))
+    if updated_at is None:
+        return 0.0
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    return updated_at.timestamp()
+
+
+def _dashboard_signal_refresh_cooldown_seconds() -> int:
+    return _dashboard_int(
+        os.getenv("VALORANT_DASHBOARD_SIGNAL_REFRESH_COOLDOWN_SECONDS", "900"),
+        900,
+        min_value=0,
+        max_value=86400,
+    )
+
+
+def _dashboard_refresh_priority(
+    aggregate: dict[str, Any] | None,
+    *,
+    now_ts: float,
+    ttl_seconds: int,
+) -> int:
+    if not isinstance(aggregate, dict):
+        return 10_000
+
+    has_impact_stats = _dashboard_has_impact_stats(aggregate)
+    if not has_impact_stats:
+        return 9_000
+
+    updated_ts = _dashboard_cache_updated_ts(aggregate)
+    if updated_ts <= 0:
+        age_seconds = float(ttl_seconds or 0)
+    else:
+        age_seconds = max(0.0, now_ts - updated_ts)
+
+    cooldown_seconds = _dashboard_signal_refresh_cooldown_seconds()
+    confidence = str(aggregate.get("confidence") or "low").lower()
+    if confidence == "low":
+        base = 7_000 if age_seconds >= cooldown_seconds else 3_500
+    elif confidence == "medium":
+        base = 5_500 if age_seconds >= cooldown_seconds else 2_800
+    else:
+        base = 1_500
+
+    age_boost = min(2_400, int(age_seconds // 60) * 10)
+    return base + age_boost
+
+
 def _dashboard_cached_aggregate(
     cache_key: str,
     *,
@@ -1241,6 +1305,7 @@ def _dashboard_cached_aggregate(
     cached["dashboard_cache"] = {
         "status": "last_good",
         "updatedAt": entry.get("updatedAt"),
+        "updatedTs": updated_ts,
     }
     return cached
 
@@ -1279,24 +1344,27 @@ def _dashboard_select_refresh_players(
 
     start = _DASHBOARD_ROLLING_CURSOR_BY_KEY.get(rolling_key, 0) % len(roster)
     ordered_indices = [(start + offset) % len(roster) for offset in range(len(roster))]
-    missing_or_stale = [
-        index
-        for index in ordered_indices
-        if (
-            cached := _dashboard_cached_aggregate(
-                cache_keys[index],
-                now_ts=now_ts,
-                ttl_seconds=ttl_seconds,
-            )
-        ) is None
-        or not _dashboard_has_impact_stats(cached)
-    ]
-    missing_or_stale_set = set(missing_or_stale)
-    cached = [index for index in ordered_indices if index not in missing_or_stale_set]
-    selected_indices = (missing_or_stale + cached)[:refresh_count]
+    prioritized_indices = []
+    for rolling_position, index in enumerate(ordered_indices):
+        cached = _dashboard_cached_aggregate(
+            cache_keys[index],
+            now_ts=now_ts,
+            ttl_seconds=ttl_seconds,
+        )
+        priority = _dashboard_refresh_priority(
+            cached,
+            now_ts=now_ts,
+            ttl_seconds=ttl_seconds,
+        )
+        prioritized_indices.append((priority, rolling_position, index))
 
-    if selected_indices:
-        _DASHBOARD_ROLLING_CURSOR_BY_KEY[rolling_key] = (selected_indices[-1] + 1) % len(roster)
+    prioritized_indices.sort(key=lambda item: (-item[0], item[1]))
+    selected = prioritized_indices[:refresh_count]
+    selected_indices = [index for _, _, index in selected]
+
+    if selected:
+        _, _, furthest_selected_index = max(selected, key=lambda item: item[1])
+        _DASHBOARD_ROLLING_CURSOR_BY_KEY[rolling_key] = (furthest_selected_index + 1) % len(roster)
 
     return [(index, roster[index]) for index in selected_indices]
 
@@ -2523,6 +2591,8 @@ async def get_cso_dashboard_snapshot(request: Request) -> Response:
         "cache": {"status": "miss", "ttlSeconds": cache_seconds},
         "rollingCache": {
             "refreshPlayersPerRequest": refresh_players,
+            "selectionPolicy": "signal-aware",
+            "signalRefreshCooldownSeconds": _dashboard_signal_refresh_cooldown_seconds(),
             "playersSelectedForRefresh": [
                 _dashboard_player_label(player) for _, player in selected_players
             ],
