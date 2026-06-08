@@ -1286,7 +1286,39 @@ def _dashboard_compact_match_detail_for_mirror(
         return None
 
     meta = _match_meta(payload)
-    started_at = _extract_match_started_at(payload)
+    started_at = (
+        _extract_match_started_at(payload)
+        or _parse_iso_datetime(meta.get("started_at"))
+        or _parse_iso_datetime(meta.get("game_start_patched"))
+        or _parse_iso_datetime(meta.get("game_start"))
+        or _parse_iso_datetime(meta.get("startedAt"))
+        or _parse_iso_datetime(meta.get("gameStart"))
+    )
+    map_name = (
+        _display_name(meta.get("map"))
+        or meta.get("map_name")
+        or meta.get("mapName")
+        or _map_name_from_match(payload)
+    )
+    mode_name = (
+        _display_name(meta.get("queue"))
+        or _display_name(meta.get("mode"))
+        or meta.get("mode_id")
+        or _extract_queue_name(payload)
+    )
+    mode_name = str(mode_name).lower() if mode_name and str(mode_name).lower() != "unknown" else None
+    game_length_seconds = _extract_match_length_seconds(payload)
+    if game_length_seconds is None:
+        for key in ("game_length_in_ms", "gameLengthInMs", "game_length", "gameLength"):
+            raw_length = meta.get(key)
+            if raw_length is None:
+                continue
+            try:
+                parsed_length = int(raw_length)
+            except Exception:
+                continue
+            game_length_seconds = parsed_length // 1000 if parsed_length > 10000 else parsed_length
+            break
     rows = _player_rows_from_match(payload)
     players = [
         {
@@ -1304,11 +1336,11 @@ def _dashboard_compact_match_detail_for_mirror(
         "matchKey": f"{region.lower()}:{match_id}",
         "region": region.lower(),
         "matchId": match_id,
-        "map": _map_name_from_match(payload),
-        "mode": _extract_queue_name(payload),
+        "map": map_name,
+        "mode": mode_name,
         "platform": meta.get("platform"),
         "startedAt": started_at.isoformat() if started_at else None,
-        "gameLengthSeconds": _extract_match_length_seconds(payload),
+        "gameLengthSeconds": game_length_seconds,
         "teams": _team_score_summary(payload),
         "playersCount": len(players),
         "players": players,
