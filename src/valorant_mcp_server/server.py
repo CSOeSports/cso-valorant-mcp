@@ -347,13 +347,16 @@ async def _collect_player_weekly_playtime_summary(
     max_pages: int = 5,
 ) -> dict[str, Any]:
     now, window_start = _playtime_window(7)
+    today_key = now.date().isoformat()
     total_seconds = 0
     matches_counted = 0
+    games_today = 0
     skipped = 0
     daily: dict[str, dict[str, Any]] = {}
     seen_match_ids: set[str] = set()
+    last_played: datetime | None = None
     stopped_due_to_old_match = False
-    page_size = max(1, min(int(page_size or 10), 10))
+    page_size = max(1, min(int(page_size or 5), 5))
     max_pages = max(1, min(int(max_pages or 5), 10))
 
     for page in range(max_pages):
@@ -406,6 +409,10 @@ async def _collect_player_weekly_playtime_summary(
             matches_counted += 1
             total_seconds += seconds_int
             date_key = started_at.date().isoformat() if started_at else "unknown"
+            if started_at and (last_played is None or started_at > last_played):
+                last_played = started_at
+            if date_key == today_key:
+                games_today += 1
             day = daily.setdefault(date_key, {"matches": 0, "seconds": 0, "hhmmss": "00:00:00"})
             day["matches"] += 1
             day["seconds"] += seconds_int
@@ -433,6 +440,8 @@ async def _collect_player_weekly_playtime_summary(
         "weekly_playtime_matches": matches_counted,
         "weekly_active_days": len([key for key in daily if key != "unknown"]),
         "weekly_playtime_daily": daily,
+        "weekly_games_today": games_today,
+        "weekly_last_played_at": last_played.isoformat() if last_played else None,
         "weekly_playtime_confidence": confidence,
         "weekly_playtime_notes": notes,
     }
@@ -1203,6 +1212,8 @@ def _dashboard_has_impact_stats(aggregate: dict[str, Any] | None) -> bool:
             "weekly_playtime_seconds",
             "weekly_playtime_hours",
             "weekly_playtime_hhmmss",
+            "weekly_games_today",
+            "weekly_last_played_at",
         )
     )
 
@@ -1352,8 +1363,8 @@ def _dashboard_player_stats(player: dict[str, Any], aggregate: dict[str, Any] | 
         "agentCounts": aggregate.get("agent_counts", {}) if aggregate else {},
         "mapCounts": aggregate.get("map_counts", {}) if aggregate else {},
         "dailyMatches": aggregate.get("daily_matches", {}) if aggregate else {},
-        "gamesToday": aggregate.get("games_today", 0) if aggregate else 0,
-        "lastPlayedAt": aggregate.get("last_played_at") if aggregate else None,
+        "gamesToday": aggregate.get("games_today", aggregate.get("weekly_games_today", 0)) if aggregate else 0,
+        "lastPlayedAt": aggregate.get("last_played_at") or aggregate.get("weekly_last_played_at") if aggregate else None,
         "rr": aggregate.get("rr") if aggregate else None,
         "rrDelta": aggregate.get("rr_delta") if aggregate else None,
         "rrWeeklyDelta": aggregate.get("rr_weekly_delta") if aggregate else None,
@@ -2161,6 +2172,29 @@ async def get_player_backfill_aggregate(
     guessed.
     """
     player_label = f"{name}#{tag}" if name and tag else puuid or "unknown"
+    rr_summary: dict[str, Any] | None = None
+    playtime_summary: dict[str, Any] | None = None
+
+    if name and tag and include_rr:
+        rr_summary = await _collect_player_rr_summary(
+            region=region,
+            platform=platform,
+            name=name,
+            tag=tag,
+            days=7,
+        )
+
+    if name and tag and include_weekly_playtime:
+        playtime_summary = await _collect_player_weekly_playtime_summary(
+            region=region,
+            platform=platform,
+            name=name,
+            tag=tag,
+            mode=mode,
+            page_size=5,
+            max_pages=5,
+        )
+
     compact_matches, errors = await _collect_player_window_stats(
         region=region,
         platform=platform,
@@ -2183,29 +2217,14 @@ async def get_player_backfill_aggregate(
         errors=errors,
         include_matches=include_matches,
     )
-    if name and tag and include_rr:
-        rr_summary = await _collect_player_rr_summary(
-            region=region,
-            platform=platform,
-            name=name,
-            tag=tag,
-            days=7,
-        )
+
+    if rr_summary:
         output.update(rr_summary)
         rank_errors = rr_summary.get("rank_errors")
         if isinstance(rank_errors, list):
             output["errors"] = [*output.get("errors", []), *rank_errors]
 
-    if name and tag and include_weekly_playtime:
-        playtime_summary = await _collect_player_weekly_playtime_summary(
-            region=region,
-            platform=platform,
-            name=name,
-            tag=tag,
-            mode=mode,
-            page_size=10,
-            max_pages=5,
-        )
+    if playtime_summary:
         output.update(playtime_summary)
 
     return output
